@@ -19,7 +19,7 @@ Example:
     >>> # Get module logger
     >>> logger = get_logger(__name__)
     >>> logger.info("Processing started")
-    >>> logger.error("An error occurred", exc_info=True)
+    >>> logger.error("An error occurred", exc_info=True).
 """
 
 import logging
