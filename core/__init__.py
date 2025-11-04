@@ -15,7 +15,7 @@ Example:
     >>> from core.logger import get_logger
     >>> 
     >>> logger = get_logger(__name__)
-    >>> logger.info(f"Connecting to {config.db_host}")
+    >>> logger.info(f"Connecting to {config.db_host}").
 """
 
 __version__ = "0.1.0"
