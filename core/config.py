@@ -19,7 +19,7 @@ Example:
     >>> engine_url = config.get_connection_string(use_warehouse=True)
     >>> 
     >>> # Access individual settings
-    >>> print(f"Host: {config.db_host}, Port: {config.db_port}")
+    >>> print(f"Host: {config.db_host}, Port: {config.db_port}").
 """
 
 import os
