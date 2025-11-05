@@ -100,3 +100,52 @@ def logging_infra_factory():
         return LoggingInfrastructure(**params)
 
     return factory
+
+
+@pytest.fixture
+def patch_schemas_create_engine():
+    """
+    Patch sqlalchemy.create_engine for create_schemas module.
+    Use in tests that need to simulate engine/connection behavior for SchemaCreator.
+    """
+    with patch("setup.create_schemas.create_engine") as mock_create_engine:
+        yield mock_create_engine
+
+
+@pytest.fixture
+def schema_creator_factory():
+    """
+    Factory that creates a SchemaCreator instance with default params.
+    Tests will patch create_engine separately.
+    """
+    from setup.create_schemas import SchemaCreator
+
+    def factory(**overrides):
+        params = dict(
+            host="localhost",
+            port=5432,
+            user="postgres",
+            password="secret",
+            database="warehouse"
+        )
+        params.update(overrides)
+        return SchemaCreator(**params)
+
+    return factory
+
+
+@pytest.fixture
+def dummy_schema_sql_module(monkeypatch):
+    """
+    Patch sql.query_builder functions used by create_schemas.
+    Returns a dict of the strings these functions will return so tests can assert executed SQL.
+    """
+    payload = {
+        "check_schema_exists_sql": "SELECT 1 FROM information_schema.schemata WHERE schema_name='bronze';",
+        "get_schema_info_sql": "SELECT schema_name, schema_owner, obj_description(...) as description FROM information_schema.schemata;"
+    }
+
+    monkeypatch.setattr("setup.create_schemas.check_schema_exists_sql", lambda schema: payload["check_schema_exists_sql"])
+    monkeypatch.setattr("setup.create_schemas.get_schema_info_sql", lambda schemas: payload["get_schema_info_sql"])
+
+    return payload
