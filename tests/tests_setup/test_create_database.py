@@ -681,6 +681,123 @@ def test_close_connections_disposes_engine(patch_create_engine, dummy_sql_module
     assert creator._admin_engine is None
     assert engine.disposed is True
 
+@mark.unit
+def test_get_admin_engine_uses_url_create(patch_create_engine, dummy_sql_module, db_creator_factory):
+    """
+    Unit test: Verify _get_admin_engine uses URL.create() for modern SQLAlchemy.
+    
+    Tests that DatabaseCreator._get_admin_engine() uses the modern URL.create()
+    method for building connection URLs, following the same pattern as create_logs
+    and create_schemas modules.
+    
+    Test Strategy:
+        - Mock URL.create() to return a test connection URL
+        - Call _get_admin_engine()
+        - Assert URL.create was called with correct parameters
+        - Assert create_engine was called with the URL from URL.create()
+    
+    Fixtures:
+        patch_create_engine: Mocks SQLAlchemy's create_engine
+        dummy_sql_module: Provides SQL query templates
+        db_creator_factory: Factory for creating DatabaseCreator instances
+    """
+    mock_engine = MagicMock()
+    patch_create_engine.return_value = mock_engine
+    
+    creator = db_creator_factory()
+    
+    with patch("setup.create_database.URL.create") as mock_url_create:
+        mock_url_create.return_value = "postgresql://test_connection_url"
+        
+        engine = creator._get_admin_engine()
+        
+        # Verify URL.create was called with correct parameters
+        mock_url_create.assert_called_once_with(
+            drivername='postgresql',
+            username='postgres',
+            password='secret',
+            host='localhost',
+            port=5432,
+            database='postgres'
+        )
+        
+        # Verify create_engine was called with URL
+        patch_create_engine.assert_called_once_with(
+            "postgresql://test_connection_url",
+            isolation_level='AUTOCOMMIT',
+            echo=False
+        )
+
+@mark.unit
+def test_get_admin_engine_fallback_to_connection_string(patch_create_engine, dummy_sql_module, db_creator_factory):
+    """
+    Unit test: Verify _get_admin_engine falls back to connection string for older SQLAlchemy.
+    
+    Tests that DatabaseCreator._get_admin_engine() gracefully falls back to
+    f-string connection string building when URL.create() is not available
+    (older SQLAlchemy versions), ensuring backward compatibility.
+    
+    Test Strategy:
+        - Mock URL.create() to raise AttributeError (simulating older SQLAlchemy)
+        - Call _get_admin_engine()
+        - Assert create_engine was called with connection string format
+    
+    Fixtures:
+        patch_create_engine: Mocks SQLAlchemy's create_engine
+        dummy_sql_module: Provides SQL query templates
+        db_creator_factory: Factory for creating DatabaseCreator instances
+    """
+    mock_engine = MagicMock()
+    patch_create_engine.return_value = mock_engine
+    
+    creator = db_creator_factory()
+    
+    # Simulate older SQLAlchemy by making URL.create raise AttributeError
+    with patch("setup.create_database.URL.create", side_effect=AttributeError):
+        engine = creator._get_admin_engine()
+        
+        # Verify create_engine was called with connection string
+        call_args = patch_create_engine.call_args
+        assert "postgresql://" in call_args[0][0]
+        assert "postgres:secret@localhost:5432/postgres" in call_args[0][0]
+        assert call_args[1]['isolation_level'] == 'AUTOCOMMIT'
+        assert call_args[1]['echo'] is False
+
+@mark.unit
+def test_get_admin_engine_creates_engine_once(patch_create_engine, dummy_sql_module, db_creator_factory):
+    """
+    Unit test: Verify _get_admin_engine creates engine only once and caches it.
+    
+    Tests that DatabaseCreator._get_admin_engine() follows the lazy initialization
+    pattern, creating the engine only on first call and returning the cached
+    instance on subsequent calls.
+    
+    Test Strategy:
+        - Create a DatabaseCreator
+        - Call _get_admin_engine() twice
+        - Assert create_engine was called only once
+        - Assert both calls return the same engine instance
+    
+    Fixtures:
+        patch_create_engine: Mocks SQLAlchemy's create_engine
+        dummy_sql_module: Provides SQL query templates
+        db_creator_factory: Factory for creating DatabaseCreator instances
+    """
+    mock_engine = MagicMock()
+    patch_create_engine.return_value = mock_engine
+    
+    creator = db_creator_factory()
+    
+    # First call should create engine
+    engine1 = creator._get_admin_engine()
+    assert engine1 is mock_engine
+    assert patch_create_engine.call_count == 1
+    
+    # Second call should return cached engine
+    engine2 = creator._get_admin_engine()
+    assert engine2 is mock_engine
+    assert patch_create_engine.call_count == 1  # Still 1, not 2
+
 # ======================
 # 2. INTEGRATION TESTS
 # ======================
