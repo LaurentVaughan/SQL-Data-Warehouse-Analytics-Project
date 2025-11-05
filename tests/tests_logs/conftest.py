@@ -101,3 +101,35 @@ def patch_audit_create_engine(monkeypatch):
     mock_create_engine = MagicMock()
     monkeypatch.setattr("logs.audit_logger.create_engine", mock_create_engine)
     return mock_create_engine
+
+
+@pytest.fixture
+def patch_error_create_engine(monkeypatch):
+    """
+    Patch create_engine in logs.error_handler module.
+    
+    Returns a MagicMock that can be configured by tests to return
+    a mock engine.
+    
+    Usage in tests:
+        patch_error_create_engine.return_value = mock_engine
+    """
+    mock_create_engine = MagicMock()
+    monkeypatch.setattr("logs.error_handler.create_engine", mock_create_engine)
+    return mock_create_engine
+
+
+@pytest.fixture
+def patch_analyzer_create_engine(monkeypatch):
+    """
+    Patch create_engine for ErrorAnalyzer in logs.error_handler module.
+    
+    This is the same as patch_error_create_engine but with a different name
+    for clarity in ErrorAnalyzer tests.
+    
+    Returns a MagicMock that can be configured by tests to return
+    a mock engine.
+    """
+    mock_create_engine = MagicMock()
+    monkeypatch.setattr("logs.error_handler.create_engine", mock_create_engine)
+    return mock_create_engine

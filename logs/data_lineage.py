@@ -53,10 +53,6 @@ Example:
 """
 
 import logging
-import os
-
-# Import the logging infrastructure models
-import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote_plus
@@ -65,7 +61,6 @@ from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Import ORM models from centralized models package (prevents circular imports)
 from models.logs_models import DataLineage
 
