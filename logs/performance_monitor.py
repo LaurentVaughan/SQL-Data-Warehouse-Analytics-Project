@@ -69,7 +69,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from setup.create_logs import PerformanceMetrics
+# Import ORM models from centralized models package (prevents circular imports)
+from models.logs_models import PerformanceMetrics
 
 logger = logging.getLogger(__name__)
 

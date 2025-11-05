@@ -54,7 +54,9 @@ __all__ = [
     'LoggingInfrastructure'
 ]
 
-from .create_database import DatabaseCreator
-from .create_logs import LoggingInfrastructure
-from .create_schemas import SchemaCreator
-from .setup_orchestrator import SetupOrchestrator
+# Note: Eager imports removed to prevent circular dependencies.
+# Import modules directly when needed:
+#   from setup.create_database import DatabaseCreator
+#   from setup.create_logs import LoggingInfrastructure
+#   from setup.create_schemas import SchemaCreator
+#   from setup.setup_orchestrator import SetupOrchestrator

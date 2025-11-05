@@ -57,28 +57,23 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote_plus
 
-from sqlalchemy import (
-    Boolean,
-    Column,
-    DateTime,
-    ForeignKey,
-    Integer,
-    Numeric,
-    String,
-    Text,
-    create_engine,
-)
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import create_engine
 from sqlalchemy.engine import URL, Engine
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
-from sqlalchemy.sql import func
+from sqlalchemy.orm import Session, sessionmaker
+
+# Import ORM models from centralized models package
+from models.logs_models import (
+    Base,
+    ConfigurationLog,
+    DataLineage,
+    ErrorLog,
+    PerformanceMetrics,
+    ProcessLog,
+)
 
 # Get logger for this module (don't configure root logger)
 logger = logging.getLogger(__name__)
-
-# SQLAlchemy declarative base
-Base = declarative_base()
 
 
 class LoggingInfrastructureError(Exception):
@@ -89,196 +84,9 @@ class LoggingInfrastructureError(Exception):
     pass
 
 
-class ProcessLog(Base):
-    """Process execution logging table for ETL audit trails.
-    
-    Tracks start/end times, status, and metadata for all ETL processes
-    across the medallion architecture. Provides comprehensive audit trail
-    for data processing operations.
-    
-    Attributes:
-        log_id: Unique identifier for each process log entry
-        process_name: Name of the ETL process
-        process_description: Detailed description of process purpose
-        start_time: Process start timestamp
-        end_time: Process completion timestamp
-        status: Process status (RUNNING/SUCCESS/FAILED)
-        rows_processed: Number of rows processed
-        source_system: Source system identifier
-        target_layer: Target medallion layer (bronze/silver/gold)
-        created_by: User or system that initiated the process
-        process_metadata: Additional JSON metadata
-    """
-    __tablename__ = 'process_log'
-    __table_args__ = {'schema': 'logs'}
-    
-    log_id = Column(Integer, primary_key=True, autoincrement=True,
-                   comment='Unique identifier for each process log entry')
-    process_name = Column(String(100), nullable=False,
-                         comment='Name of the process (e.g., bronze_ingestion, silver_transform)')
-    process_description = Column(Text,
-                               comment='Detailed description of what the process does')
-    start_time = Column(DateTime, nullable=False, default=func.now(),
-                       comment='Process start timestamp')
-    end_time = Column(DateTime,
-                     comment='Process end timestamp')
-    status = Column(String(20), nullable=False, default='RUNNING',
-                   comment='Process status: RUNNING, SUCCESS, FAILED, CANCELLED')
-    rows_processed = Column(Integer,
-                          comment='Number of rows processed')
-    rows_inserted = Column(Integer,
-                         comment='Number of rows inserted')
-    rows_updated = Column(Integer,
-                        comment='Number of rows updated')
-    rows_deleted = Column(Integer,
-                        comment='Number of rows deleted')
-    source_system = Column(String(50),
-                         comment='Source system identifier (CRM, ERP, etc.)')
-    target_layer = Column(String(20),
-                        comment='Target medallion layer (bronze, silver, gold)')
-    error_message = Column(Text,
-                         comment='Error message if process failed')
-    process_metadata = Column(JSONB,
-                            comment='Additional JSON metadata about the process')
-    created_by = Column(String(50), nullable=False, default='system',
-                       comment='User or system that initiated the process')
-    
-    # Relationships
-    error_logs = relationship("ErrorLog", back_populates="process")
-    data_lineage = relationship("DataLineage", back_populates="process")
-
-
-class ErrorLog(Base):
-    """
-    Error logging table.
-    
-    Captures detailed error information including stack traces,
-    error codes, and recovery suggestions.
-    """
-    __tablename__ = 'error_log'
-    __table_args__ = {'schema': 'logs'}
-    
-    error_id = Column(Integer, primary_key=True, autoincrement=True,
-                     comment='Unique identifier for each error log entry')
-    process_log_id = Column(Integer, ForeignKey('logs.process_log.log_id'),
-                          comment='Reference to the process that generated the error')
-    error_timestamp = Column(DateTime, nullable=False, default=func.now(),
-                           comment='When the error occurred')
-    error_level = Column(String(10), nullable=False, default='ERROR',
-                        comment='Error severity: DEBUG, INFO, WARNING, ERROR, CRITICAL')
-    error_code = Column(String(20),
-                       comment='Application-specific error code')
-    error_message = Column(Text, nullable=False,
-                         comment='Human-readable error message')
-    error_detail = Column(Text,
-                        comment='Detailed error information including stack trace')
-    table_name = Column(String(100),
-                       comment='Table involved in the error')
-    column_name = Column(String(100),
-                        comment='Column involved in the error')
-    row_context = Column(Text,
-                        comment='Row data or context where error occurred')
-    recovery_suggestion = Column(Text,
-                               comment='Suggested steps to resolve the error')
-    is_resolved = Column(Boolean, default=False,
-                        comment='Whether the error has been resolved')
-    resolved_by = Column(String(50),
-                        comment='User who marked the error as resolved')
-    resolved_timestamp = Column(DateTime,
-                              comment='When the error was marked as resolved')
-    
-    # Relationships
-    process = relationship("ProcessLog", back_populates="error_logs")
-
-
-class DataLineage(Base):
-    """
-    Data lineage tracking table.
-    
-    Tracks the flow of data through the medallion architecture,
-    enabling impact analysis and data governance.
-    """
-    __tablename__ = 'data_lineage'
-    __table_args__ = {'schema': 'logs'}
-    
-    lineage_id = Column(Integer, primary_key=True, autoincrement=True,
-                       comment='Unique identifier for each lineage entry')
-    process_log_id = Column(Integer, ForeignKey('logs.process_log.log_id'),
-                          comment='Reference to the process that created this lineage')
-    source_schema = Column(String(50),
-                         comment='Source schema name')
-    source_table = Column(String(100),
-                        comment='Source table name')
-    source_column = Column(String(100),
-                         comment='Source column name (optional)')
-    target_schema = Column(String(50),
-                         comment='Target schema name')
-    target_table = Column(String(100),
-                        comment='Target table name')
-    target_column = Column(String(100),
-                         comment='Target column name (optional)')
-    transformation_logic = Column(Text,
-                                comment='Description of transformation applied')
-    record_count = Column(Integer,
-                        comment='Number of records involved in this lineage')
-    created_timestamp = Column(DateTime, nullable=False, default=func.now(),
-                             comment='When this lineage entry was created')
-    
-    # Relationships
-    process = relationship("ProcessLog", back_populates="data_lineage")
-
-
-class PerformanceMetrics(Base):
-    """
-    Performance metrics table.
-    
-    Captures performance statistics for monitoring and optimization
-    of ETL processes across the medallion architecture.
-    """
-    __tablename__ = 'performance_metrics'
-    __table_args__ = {'schema': 'logs'}
-    
-    metric_id = Column(Integer, primary_key=True, autoincrement=True,
-                      comment='Unique identifier for each metric entry')
-    process_log_id = Column(Integer, ForeignKey('logs.process_log.log_id'),
-                          comment='Reference to the process being measured')
-    metric_name = Column(String(100), nullable=False,
-                        comment='Name of the performance metric')
-    metric_value = Column(Numeric(15, 4),
-                        comment='Numeric value of the metric')
-    metric_unit = Column(String(20),
-                        comment='Unit of measurement (seconds, MB, rows/sec, etc.)')
-    measurement_timestamp = Column(DateTime, nullable=False, default=func.now(),
-                                 comment='When the metric was captured')
-    additional_context = Column(Text,
-                              comment='Additional context about the measurement')
-
-
-class ConfigurationLog(Base):
-    """
-    Configuration change log table.
-    
-    Tracks changes to system configuration for audit and rollback purposes.
-    """
-    __tablename__ = 'configuration_log'
-    __table_args__ = {'schema': 'logs'}
-    
-    config_log_id = Column(Integer, primary_key=True, autoincrement=True,
-                          comment='Unique identifier for each configuration change')
-    config_key = Column(String(100), nullable=False,
-                       comment='Configuration parameter name')
-    old_value = Column(Text,
-                      comment='Previous configuration value')
-    new_value = Column(Text,
-                      comment='New configuration value')
-    change_reason = Column(Text,
-                         comment='Reason for the configuration change')
-    changed_by = Column(String(50), nullable=False,
-                       comment='User who made the change')
-    change_timestamp = Column(DateTime, nullable=False, default=func.now(),
-                            comment='When the change was made')
-    environment = Column(String(20), default='production',
-                        comment='Environment where change was made (dev, test, prod)')
+# Note: ORM models (ProcessLog, ErrorLog, DataLineage, PerformanceMetrics, ConfigurationLog)
+# have been moved to models/logs_models.py to prevent circular imports.
+# They are imported at the top of this file from models.logs_models.
 
 
 class LoggingInfrastructure:
