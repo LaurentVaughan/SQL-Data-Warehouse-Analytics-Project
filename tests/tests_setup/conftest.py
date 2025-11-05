@@ -68,3 +68,35 @@ def db_creator_factory():
         return DatabaseCreator(**params)
 
     return factory
+
+
+@pytest.fixture
+def patch_logging_create_engine():
+    """
+    Patch sqlalchemy.create_engine for create_logs module.
+    Use in tests that need to simulate engine/connection behavior for LoggingInfrastructure.
+    """
+    with patch("setup.create_logs.create_engine") as mock_create_engine:
+        yield mock_create_engine
+
+
+@pytest.fixture
+def logging_infra_factory():
+    """
+    Factory that creates a LoggingInfrastructure instance with default params.
+    Tests will patch create_engine separately.
+    """
+    from setup.create_logs import LoggingInfrastructure
+
+    def factory(**overrides):
+        params = dict(
+            host="localhost",
+            port=5432,
+            user="postgres",
+            password="secret",
+            database="warehouse"
+        )
+        params.update(overrides)
+        return LoggingInfrastructure(**params)
+
+    return factory
