@@ -23,11 +23,11 @@ Mocks and helpers:
 
 How to Execute:
 ---------------
-All tests:          python -m pytest tests/tests_setup/test_create_database.py -v
-By category:        python -m pytest tests/tests_setup/test_create_database.py -m unit
-Multiple markers:   python -m pytest tests/tests_setup/test_create_database.py -m "unit or integration"
-Specific test:      python -m pytest tests/tests_setup/test_create_database.py::test_check_database_exists_true
-With coverage:      python -m pytest tests/tests_setup/test_create_database.py --cov=setup.create_database
+All tests:          pytest tests/tests_setup/test_create_database.py -v
+By category:        pytest tests/tests_setup/test_create_database.py -m unit
+Multiple markers:   pytest tests/tests_setup/test_create_database.py -m "unit or integration"
+Specific test:      pytest tests/tests_setup/test_create_database.py::test_check_database_exists_true
+With coverage:      pytest tests/tests_setup/test_create_database.py --cov=setup.create_database
 
 Note: Use 'python -m pytest' (not just 'pytest') to ensure correct Python path resolution.
 
