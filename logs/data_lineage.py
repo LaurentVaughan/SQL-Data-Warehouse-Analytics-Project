@@ -53,11 +53,13 @@ Example:
 """
 
 import logging
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote_plus
 
 from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -138,18 +140,41 @@ class LineageTracker:
     def _get_engine(self) -> Engine:
         """Get SQLAlchemy engine."""
         if self._engine is None:
-            connection_string = (
-                f"postgresql://{self.user}:{quote_plus(self.password)}"
-                f"@{self.host}:{self.port}/{self.database}"
-            )
-            self._engine = create_engine(connection_string, echo=False)
+            # Use modern URL.create() for robust connection string building
+            try:
+                connection_url = URL.create(
+                    drivername='postgresql',
+                    username=self.user,
+                    password=self.password,
+                    host=self.host,
+                    port=self.port,
+                    database=self.database
+                )
+                self._engine = create_engine(connection_url, echo=False)
+            except AttributeError:
+                # Fallback for older SQLAlchemy versions
+                connection_string = (
+                    f"postgresql://{self.user}:{quote_plus(self.password)}"
+                    f"@{self.host}:{self.port}/{self.database}"
+                )
+                self._engine = create_engine(connection_string, echo=False)
         return self._engine
     
-    def _get_session(self) -> Session:
-        """Get SQLAlchemy session."""
+    @contextmanager
+    def _get_session(self):
+        """Get SQLAlchemy session with proper resource management."""
         if self._session_factory is None:
             self._session_factory = sessionmaker(bind=self._get_engine())
-        return self._session_factory()
+        
+        session = self._session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
     
     def log_lineage(
         self,
@@ -181,29 +206,27 @@ class LineageTracker:
             Data lineage ID
         """
         try:
-            session = self._get_session()
-            
-            lineage = DataLineage(
-                process_log_id=process_log_id,
-                source_schema=source_schema,
-                source_table=source_table,
-                source_column=source_column,
-                target_schema=target_schema,
-                target_table=target_table,
-                target_column=target_column,
-                transformation_logic=transformation_logic,
-                record_count=record_count
-            )
-            
-            session.add(lineage)
-            session.commit()
-            
-            lineage_id = lineage.lineage_id
-            session.close()
-            
-            logger.info(f"Logged lineage {lineage_id}: {source_schema}.{source_table} -> {target_schema}.{target_table}")
-            return lineage_id
-            
+            with self._get_session() as session:
+                lineage = DataLineage(
+                    process_log_id=process_log_id,
+                    source_schema=source_schema,
+                    source_table=source_table,
+                    source_column=source_column,
+                    target_schema=target_schema,
+                    target_table=target_table,
+                    target_column=target_column,
+                    transformation_logic=transformation_logic,
+                    record_count=record_count
+                )
+                
+                session.add(lineage)
+                session.flush()  # Get the ID before commit
+                
+                lineage_id = lineage.lineage_id
+                
+                logger.info(f"Logged lineage {lineage_id}: {source_schema}.{source_table} -> {target_schema}.{target_table}")
+                return lineage_id
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to log data lineage: {e}")
             raise DataLineageError(f"Failed to log data lineage: {e}")
@@ -312,11 +335,24 @@ class LineageAnalyzer:
     def _get_engine(self) -> Engine:
         """Get SQLAlchemy engine."""
         if self._engine is None:
-            connection_string = (
-                f"postgresql://{self.user}:{quote_plus(self.password)}"
-                f"@{self.host}:{self.port}/{self.database}"
-            )
-            self._engine = create_engine(connection_string, echo=False)
+            # Use modern URL.create() for robust connection string building
+            try:
+                connection_url = URL.create(
+                    drivername='postgresql',
+                    username=self.user,
+                    password=self.password,
+                    host=self.host,
+                    port=self.port,
+                    database=self.database
+                )
+                self._engine = create_engine(connection_url, echo=False)
+            except AttributeError:
+                # Fallback for older SQLAlchemy versions
+                connection_string = (
+                    f"postgresql://{self.user}:{quote_plus(self.password)}"
+                    f"@{self.host}:{self.port}/{self.database}"
+                )
+                self._engine = create_engine(connection_string, echo=False)
         return self._engine
     
     def get_upstream_lineage(

@@ -62,11 +62,13 @@ import json
 import logging
 import time
 import traceback
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote_plus
 
 from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -144,18 +146,41 @@ class ErrorLogger:
     def _get_engine(self) -> Engine:
         """Get SQLAlchemy engine."""
         if self._engine is None:
-            connection_string = (
-                f"postgresql://{self.user}:{quote_plus(self.password)}"
-                f"@{self.host}:{self.port}/{self.database}"
-            )
-            self._engine = create_engine(connection_string, echo=False)
+            # Use modern URL.create() for robust connection string building
+            try:
+                connection_url = URL.create(
+                    drivername='postgresql',
+                    username=self.user,
+                    password=self.password,
+                    host=self.host,
+                    port=self.port,
+                    database=self.database
+                )
+                self._engine = create_engine(connection_url, echo=False)
+            except AttributeError:
+                # Fallback for older SQLAlchemy versions
+                connection_string = (
+                    f"postgresql://{self.user}:{quote_plus(self.password)}"
+                    f"@{self.host}:{self.port}/{self.database}"
+                )
+                self._engine = create_engine(connection_string, echo=False)
         return self._engine
     
-    def _get_session(self) -> Session:
-        """Get SQLAlchemy session."""
+    @contextmanager
+    def _get_session(self):
+        """Get SQLAlchemy session with proper resource management."""
         if self._session_factory is None:
             self._session_factory = sessionmaker(bind=self._get_engine())
-        return self._session_factory()
+        
+        session = self._session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
     
     def log_error(
         self,
@@ -189,37 +214,35 @@ class ErrorLogger:
             Error log ID
         """
         try:
-            session = self._get_session()
-            
-            # Extract details from exception if provided
-            if exception and not error_detail:
-                error_detail = traceback.format_exc()
-            
-            # Auto-generate error code if not provided
-            if not error_code and exception:
-                error_code = f"{type(exception).__name__}"
-            
-            error_log = ErrorLog(
-                process_log_id=process_log_id,
-                error_level=error_level,
-                error_code=error_code,
-                error_message=error_message,
-                error_detail=error_detail,
-                table_name=table_name,
-                column_name=column_name,
-                row_context=row_context,
-                recovery_suggestion=recovery_suggestion
-            )
-            
-            session.add(error_log)
-            session.commit()
-            
-            error_id = error_log.error_id
-            session.close()
-            
-            logger.error(f"Logged error {error_id}: {error_message}")
-            return error_id
-            
+            with self._get_session() as session:
+                # Extract details from exception if provided
+                if exception and not error_detail:
+                    error_detail = traceback.format_exc()
+                
+                # Auto-generate error code if not provided
+                if not error_code and exception:
+                    error_code = f"{type(exception).__name__}"
+                
+                error_log = ErrorLog(
+                    process_log_id=process_log_id,
+                    error_level=error_level,
+                    error_code=error_code,
+                    error_message=error_message,
+                    error_detail=error_detail,
+                    table_name=table_name,
+                    column_name=column_name,
+                    row_context=row_context,
+                    recovery_suggestion=recovery_suggestion
+                )
+                
+                session.add(error_log)
+                session.flush()  # Get the ID before commit
+                
+                error_id = error_log.error_id
+                
+                logger.error(f"Logged error {error_id}: {error_message}")
+                return error_id
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to log error: {e}")
             raise ErrorHandlerError(f"Failed to log error: {e}")
@@ -278,28 +301,24 @@ class ErrorLogger:
             resolution_notes: Optional resolution notes
         """
         try:
-            session = self._get_session()
-            
-            error_log = session.query(ErrorLog).filter_by(error_id=error_id).first()
-            if not error_log:
-                raise ErrorHandlerError(f"Error log with ID {error_id} not found")
-            
-            error_log.is_resolved = True
-            error_log.resolved_by = resolved_by
-            error_log.resolved_timestamp = datetime.now()
-            
-            if resolution_notes:
-                # Store resolution notes in recovery_suggestion field if empty
-                if not error_log.recovery_suggestion:
-                    error_log.recovery_suggestion = resolution_notes
-                else:
-                    error_log.recovery_suggestion += f"\n\nResolution: {resolution_notes}"
-            
-            session.commit()
-            session.close()
-            
-            logger.info(f"Marked error {error_id} as resolved by {resolved_by}")
-            
+            with self._get_session() as session:
+                error_log = session.query(ErrorLog).filter_by(error_id=error_id).first()
+                if not error_log:
+                    raise ErrorHandlerError(f"Error log with ID {error_id} not found")
+                
+                error_log.is_resolved = True
+                error_log.resolved_by = resolved_by
+                error_log.resolved_timestamp = datetime.now()
+                
+                if resolution_notes:
+                    # Store resolution notes in recovery_suggestion field if empty
+                    if not error_log.recovery_suggestion:
+                        error_log.recovery_suggestion = resolution_notes
+                    else:
+                        error_log.recovery_suggestion += f"\n\nResolution: {resolution_notes}"
+                
+                logger.info(f"Marked error {error_id} as resolved by {resolved_by}")
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to mark error as resolved: {e}")
             raise ErrorHandlerError(f"Failed to mark error as resolved: {e}")
@@ -322,38 +341,36 @@ class ErrorLogger:
             List of unresolved error records
         """
         try:
-            session = self._get_session()
-            
-            query = session.query(ErrorLog).filter(
-                ErrorLog.is_resolved == False,
-                ErrorLog.error_timestamp >= datetime.now() - timedelta(days=days)
-            )
-            
-            if error_level:
-                query = query.filter(ErrorLog.error_level == error_level)
-            
-            if process_name:
-                query = query.join(ProcessLog).filter(ProcessLog.process_name == process_name)
-            
-            errors = query.order_by(ErrorLog.error_timestamp.desc()).all()
-            
-            results = []
-            for error in errors:
-                results.append({
-                    'error_id': error.error_id,
-                    'process_log_id': error.process_log_id,
-                    'error_timestamp': error.error_timestamp,
-                    'error_level': error.error_level,
-                    'error_code': error.error_code,
-                    'error_message': error.error_message,
-                    'table_name': error.table_name,
-                    'column_name': error.column_name,
-                    'recovery_suggestion': error.recovery_suggestion
-                })
-            
-            session.close()
-            return results
-            
+            with self._get_session() as session:
+                query = session.query(ErrorLog).filter(
+                    ErrorLog.is_resolved == False,
+                    ErrorLog.error_timestamp >= datetime.now() - timedelta(days=days)
+                )
+                
+                if error_level:
+                    query = query.filter(ErrorLog.error_level == error_level)
+                
+                if process_name:
+                    query = query.join(ProcessLog).filter(ProcessLog.process_name == process_name)
+                
+                errors = query.order_by(ErrorLog.error_timestamp.desc()).all()
+                
+                results = []
+                for error in errors:
+                    results.append({
+                        'error_id': error.error_id,
+                        'process_log_id': error.process_log_id,
+                        'error_timestamp': error.error_timestamp,
+                        'error_level': error.error_level,
+                        'error_code': error.error_code,
+                        'error_message': error.error_message,
+                        'table_name': error.table_name,
+                        'column_name': error.column_name,
+                        'recovery_suggestion': error.recovery_suggestion
+                    })
+                
+                return results
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to get unresolved errors: {e}")
             raise ErrorHandlerError(f"Failed to get unresolved errors: {e}")
@@ -533,11 +550,24 @@ class ErrorAnalyzer:
     def _get_engine(self) -> Engine:
         """Get SQLAlchemy engine."""
         if self._engine is None:
-            connection_string = (
-                f"postgresql://{self.user}:{quote_plus(self.password)}"
-                f"@{self.host}:{self.port}/{self.database}"
-            )
-            self._engine = create_engine(connection_string, echo=False)
+            # Use modern URL.create() for robust connection string building
+            try:
+                connection_url = URL.create(
+                    drivername='postgresql',
+                    username=self.user,
+                    password=self.password,
+                    host=self.host,
+                    port=self.port,
+                    database=self.database
+                )
+                self._engine = create_engine(connection_url, echo=False)
+            except AttributeError:
+                # Fallback for older SQLAlchemy versions
+                connection_string = (
+                    f"postgresql://{self.user}:{quote_plus(self.password)}"
+                    f"@{self.host}:{self.port}/{self.database}"
+                )
+                self._engine = create_engine(connection_string, echo=False)
         return self._engine
     
     def analyze_error_patterns(self, days: int = 30) -> Dict[str, Any]:

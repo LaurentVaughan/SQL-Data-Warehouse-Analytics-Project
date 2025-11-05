@@ -61,6 +61,7 @@ from urllib.parse import quote_plus
 
 import psutil
 from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -144,18 +145,41 @@ class PerformanceMonitor:
     def _get_engine(self) -> Engine:
         """Get SQLAlchemy engine."""
         if self._engine is None:
-            connection_string = (
-                f"postgresql://{self.user}:{quote_plus(self.password)}"
-                f"@{self.host}:{self.port}/{self.database}"
-            )
-            self._engine = create_engine(connection_string, echo=False)
+            # Use modern URL.create() for robust connection string building
+            try:
+                connection_url = URL.create(
+                    drivername='postgresql',
+                    username=self.user,
+                    password=self.password,
+                    host=self.host,
+                    port=self.port,
+                    database=self.database
+                )
+                self._engine = create_engine(connection_url, echo=False)
+            except AttributeError:
+                # Fallback for older SQLAlchemy versions
+                connection_string = (
+                    f"postgresql://{self.user}:{quote_plus(self.password)}"
+                    f"@{self.host}:{self.port}/{self.database}"
+                )
+                self._engine = create_engine(connection_string, echo=False)
         return self._engine
     
-    def _get_session(self) -> Session:
-        """Get SQLAlchemy session."""
+    @contextmanager
+    def _get_session(self):
+        """Get SQLAlchemy session with proper resource management."""
         if self._session_factory is None:
             self._session_factory = sessionmaker(bind=self._get_engine())
-        return self._session_factory()
+        
+        session = self._session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
     
     def record_metric(
         self,
@@ -179,25 +203,23 @@ class PerformanceMonitor:
             Metric ID
         """
         try:
-            session = self._get_session()
-            
-            metric = PerformanceMetrics(
-                process_log_id=process_log_id,
-                metric_name=metric_name,
-                metric_value=metric_value,
-                metric_unit=metric_unit,
-                additional_context=additional_context
-            )
-            
-            session.add(metric)
-            session.commit()
-            
-            metric_id = metric.metric_id
-            session.close()
-            
-            logger.debug(f"Recorded metric '{metric_name}': {metric_value} {metric_unit or ''}")
-            return metric_id
-            
+            with self._get_session() as session:
+                metric = PerformanceMetrics(
+                    process_log_id=process_log_id,
+                    metric_name=metric_name,
+                    metric_value=metric_value,
+                    metric_unit=metric_unit,
+                    additional_context=additional_context
+                )
+                
+                session.add(metric)
+                session.flush()  # Get the ID before commit
+                
+                metric_id = metric.metric_id
+                
+                logger.debug(f"Recorded metric '{metric_name}': {metric_value} {metric_unit or ''}")
+                return metric_id
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to record metric: {e}")
             raise PerformanceMonitorError(f"Failed to record metric: {e}")
@@ -340,11 +362,24 @@ class MetricsCollector:
     def _get_engine(self) -> Engine:
         """Get SQLAlchemy engine."""
         if self._engine is None:
-            connection_string = (
-                f"postgresql://{self.user}:{quote_plus(self.password)}"
-                f"@{self.host}:{self.port}/{self.database}"
-            )
-            self._engine = create_engine(connection_string, echo=False)
+            # Use modern URL.create() for robust connection string building
+            try:
+                connection_url = URL.create(
+                    drivername='postgresql',
+                    username=self.user,
+                    password=self.password,
+                    host=self.host,
+                    port=self.port,
+                    database=self.database
+                )
+                self._engine = create_engine(connection_url, echo=False)
+            except AttributeError:
+                # Fallback for older SQLAlchemy versions
+                connection_string = (
+                    f"postgresql://{self.user}:{quote_plus(self.password)}"
+                    f"@{self.host}:{self.port}/{self.database}"
+                )
+                self._engine = create_engine(connection_string, echo=False)
         return self._engine
     
     def get_performance_summary(
