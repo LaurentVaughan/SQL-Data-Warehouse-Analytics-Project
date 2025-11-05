@@ -59,21 +59,18 @@ Example:
     ... )
 """
 
-import json
 import logging
-import os
-
-# Import the logging infrastructure models
-import sys
-from datetime import datetime
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote_plus
 
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import create_engine
+from sqlalchemy.engine import URL, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Import ORM models using proper package structure (no sys.path manipulation)
 from setup.create_logs import (
     ConfigurationLog,
     DataLineage,
@@ -152,18 +149,41 @@ class ProcessLogger:
     def _get_engine(self) -> Engine:
         """Get SQLAlchemy engine."""
         if self._engine is None:
-            connection_string = (
-                f"postgresql://{self.user}:{quote_plus(self.password)}"
-                f"@{self.host}:{self.port}/{self.database}"
-            )
-            self._engine = create_engine(connection_string, echo=False)
+            # Use modern URL.create() for robust connection string building
+            try:
+                connection_url = URL.create(
+                    drivername='postgresql',
+                    username=self.user,
+                    password=self.password,
+                    host=self.host,
+                    port=self.port,
+                    database=self.database
+                )
+                self._engine = create_engine(connection_url, echo=False)
+            except AttributeError:
+                # Fallback for older SQLAlchemy versions
+                connection_string = (
+                    f"postgresql://{self.user}:{quote_plus(self.password)}"
+                    f"@{self.host}:{self.port}/{self.database}"
+                )
+                self._engine = create_engine(connection_string, echo=False)
         return self._engine
     
-    def _get_session(self) -> Session:
-        """Get SQLAlchemy session."""
+    @contextmanager
+    def _get_session(self):
+        """Get SQLAlchemy session with proper resource management."""
         if self._session_factory is None:
             self._session_factory = sessionmaker(bind=self._get_engine())
-        return self._session_factory()
+        
+        session = self._session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
     
     def start_process(
         self,
@@ -183,32 +203,30 @@ class ProcessLogger:
             source_system: Source system identifier
             target_layer: Target medallion layer
             created_by: User or system initiating the process
-            metadata: Additional metadata as dictionary
+            metadata: Additional metadata as dictionary (will be stored as JSONB)
             
         Returns:
             Process log ID for tracking
         """
         try:
-            session = self._get_session()
-            
-            process_log = ProcessLog(
-                process_name=process_name,
-                process_description=process_description,
-                source_system=source_system,
-                target_layer=target_layer,
-                created_by=created_by,
-                process_metadata=json.dumps(metadata) if metadata else None
-            )
-            
-            session.add(process_log)
-            session.commit()
-            
-            log_id = process_log.log_id
-            session.close()
-            
-            logger.info(f"Started process '{process_name}' with log_id {log_id}")
-            return log_id
-            
+            with self._get_session() as session:
+                process_log = ProcessLog(
+                    process_name=process_name,
+                    process_description=process_description,
+                    source_system=source_system,
+                    target_layer=target_layer,
+                    created_by=created_by,
+                    process_metadata=metadata  # Pass dict directly to JSONB column
+                )
+                
+                session.add(process_log)
+                session.flush()  # Get the ID before commit
+                
+                log_id = process_log.log_id
+                
+                logger.info(f"Started process '{process_name}' with log_id {log_id}")
+                return log_id
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to log process start: {e}")
             raise AuditLoggerError(f"Failed to log process start: {e}")
@@ -236,25 +254,22 @@ class ProcessLogger:
             error_message: Error message if status is FAILED
         """
         try:
-            session = self._get_session()
-            
-            process_log = session.query(ProcessLog).filter_by(log_id=log_id).first()
-            if not process_log:
-                raise AuditLoggerError(f"Process log with ID {log_id} not found")
-            
-            process_log.end_time = datetime.now()
-            process_log.status = status
-            process_log.rows_processed = rows_processed
-            process_log.rows_inserted = rows_inserted
-            process_log.rows_updated = rows_updated
-            process_log.rows_deleted = rows_deleted
-            process_log.error_message = error_message
-            
-            session.commit()
-            session.close()
-            
-            logger.info(f"Completed process '{process_log.process_name}' with status {status}")
-            
+            with self._get_session() as session:
+                process_log = session.query(ProcessLog).filter_by(log_id=log_id).first()
+                if not process_log:
+                    raise AuditLoggerError(f"Process log with ID {log_id} not found")
+                
+                # Use UTC for audit logs
+                process_log.end_time = datetime.now(timezone.utc)
+                process_log.status = status
+                process_log.rows_processed = rows_processed
+                process_log.rows_inserted = rows_inserted
+                process_log.rows_updated = rows_updated
+                process_log.rows_deleted = rows_deleted
+                process_log.error_message = error_message
+                
+                logger.info(f"Completed process '{process_log.process_name}' with status {status}")
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to log process end: {e}")
             raise AuditLoggerError(f"Failed to log process end: {e}")
@@ -278,26 +293,22 @@ class ProcessLogger:
             rows_deleted: Updated rows deleted count
         """
         try:
-            session = self._get_session()
-            
-            process_log = session.query(ProcessLog).filter_by(log_id=log_id).first()
-            if not process_log:
-                raise AuditLoggerError(f"Process log with ID {log_id} not found")
-            
-            if rows_processed is not None:
-                process_log.rows_processed = rows_processed
-            if rows_inserted is not None:
-                process_log.rows_inserted = rows_inserted
-            if rows_updated is not None:
-                process_log.rows_updated = rows_updated
-            if rows_deleted is not None:
-                process_log.rows_deleted = rows_deleted
-            
-            session.commit()
-            session.close()
-            
-            logger.debug(f"Updated metrics for process {log_id}")
-            
+            with self._get_session() as session:
+                process_log = session.query(ProcessLog).filter_by(log_id=log_id).first()
+                if not process_log:
+                    raise AuditLoggerError(f"Process log with ID {log_id} not found")
+                
+                if rows_processed is not None:
+                    process_log.rows_processed = rows_processed
+                if rows_inserted is not None:
+                    process_log.rows_inserted = rows_inserted
+                if rows_updated is not None:
+                    process_log.rows_updated = rows_updated
+                if rows_deleted is not None:
+                    process_log.rows_deleted = rows_deleted
+                
+                logger.debug(f"Updated metrics for process {log_id}")
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to update process metrics: {e}")
             raise AuditLoggerError(f"Failed to update process metrics: {e}")
@@ -310,24 +321,22 @@ class ProcessLogger:
             List of active process dictionaries
         """
         try:
-            session = self._get_session()
-            
-            active_processes = session.query(ProcessLog).filter_by(status='RUNNING').all()
-            
-            results = []
-            for process in active_processes:
-                results.append({
-                    'log_id': process.log_id,
-                    'process_name': process.process_name,
-                    'start_time': process.start_time,
-                    'source_system': process.source_system,
-                    'target_layer': process.target_layer,
-                    'created_by': process.created_by
-                })
-            
-            session.close()
-            return results
-            
+            with self._get_session() as session:
+                active_processes = session.query(ProcessLog).filter_by(status='RUNNING').all()
+                
+                results = []
+                for process in active_processes:
+                    results.append({
+                        'log_id': process.log_id,
+                        'process_name': process.process_name,
+                        'start_time': process.start_time,
+                        'source_system': process.source_system,
+                        'target_layer': process.target_layer,
+                        'created_by': process.created_by
+                    })
+                
+                return results
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to get active processes: {e}")
             raise AuditLoggerError(f"Failed to get active processes: {e}")
@@ -350,47 +359,50 @@ class ProcessLogger:
             List of process history records
         """
         try:
-            session = self._get_session()
-            
-            query = session.query(ProcessLog)
-            
-            # Add filters
-            query = query.filter(
-                ProcessLog.start_time >= datetime.now() - datetime.timedelta(days=days)
-            )
-            
-            if process_name:
-                query = query.filter(ProcessLog.process_name == process_name)
-            
-            if status:
-                query = query.filter(ProcessLog.status == status)
-            
-            processes = query.order_by(ProcessLog.start_time.desc()).all()
-            
-            results = []
-            for process in processes:
-                duration = None
-                if process.end_time:
-                    duration = (process.end_time - process.start_time).total_seconds()
+            with self._get_session() as session:
+                query = session.query(ProcessLog)
                 
-                results.append({
-                    'log_id': process.log_id,
-                    'process_name': process.process_name,
-                    'status': process.status,
-                    'start_time': process.start_time,
-                    'end_time': process.end_time,
-                    'duration_seconds': duration,
-                    'rows_processed': process.rows_processed,
-                    'source_system': process.source_system,
-                    'target_layer': process.target_layer
-                })
-            
-            session.close()
-            return results
-            
+                # Add filters - use UTC for consistent time filtering
+                cutoff_time = datetime.now(timezone.utc) - timedelta(days=days)
+                query = query.filter(ProcessLog.start_time >= cutoff_time)
+                
+                if process_name:
+                    query = query.filter(ProcessLog.process_name == process_name)
+                
+                if status:
+                    query = query.filter(ProcessLog.status == status)
+                
+                processes = query.order_by(ProcessLog.start_time.desc()).all()
+                
+                results = []
+                for process in processes:
+                    duration = None
+                    if process.end_time:
+                        duration = (process.end_time - process.start_time).total_seconds()
+                    
+                    results.append({
+                        'log_id': process.log_id,
+                        'process_name': process.process_name,
+                        'status': process.status,
+                        'start_time': process.start_time,
+                        'end_time': process.end_time,
+                        'duration_seconds': duration,
+                        'rows_processed': process.rows_processed,
+                        'source_system': process.source_system,
+                        'target_layer': process.target_layer
+                    })
+                
+                return results
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to get process history: {e}")
             raise AuditLoggerError(f"Failed to get process history: {e}")
+    
+    def close_connections(self) -> None:
+        """Close database connections."""
+        if self._engine:
+            self._engine.dispose()
+            self._engine = None
 
 
 class ConfigurationLogger:
@@ -422,18 +434,41 @@ class ConfigurationLogger:
     def _get_engine(self) -> Engine:
         """Get SQLAlchemy engine."""
         if self._engine is None:
-            connection_string = (
-                f"postgresql://{self.user}:{quote_plus(self.password)}"
-                f"@{self.host}:{self.port}/{self.database}"
-            )
-            self._engine = create_engine(connection_string, echo=False)
+            # Use modern URL.create() for robust connection string building
+            try:
+                connection_url = URL.create(
+                    drivername='postgresql',
+                    username=self.user,
+                    password=self.password,
+                    host=self.host,
+                    port=self.port,
+                    database=self.database
+                )
+                self._engine = create_engine(connection_url, echo=False)
+            except AttributeError:
+                # Fallback for older SQLAlchemy versions
+                connection_string = (
+                    f"postgresql://{self.user}:{quote_plus(self.password)}"
+                    f"@{self.host}:{self.port}/{self.database}"
+                )
+                self._engine = create_engine(connection_string, echo=False)
         return self._engine
     
-    def _get_session(self) -> Session:
-        """Get SQLAlchemy session."""
+    @contextmanager
+    def _get_session(self):
+        """Get SQLAlchemy session with proper resource management."""
         if self._session_factory is None:
             self._session_factory = sessionmaker(bind=self._get_engine())
-        return self._session_factory()
+        
+        session = self._session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
     
     def log_config_change(
         self,
@@ -459,26 +494,24 @@ class ConfigurationLogger:
             Configuration log ID
         """
         try:
-            session = self._get_session()
-            
-            config_log = ConfigurationLog(
-                config_key=config_key,
-                old_value=old_value,
-                new_value=new_value,
-                change_reason=change_reason,
-                changed_by=changed_by,
-                environment=environment
-            )
-            
-            session.add(config_log)
-            session.commit()
-            
-            log_id = config_log.config_log_id
-            session.close()
-            
-            logger.info(f"Logged configuration change for '{config_key}': {old_value} -> {new_value}")
-            return log_id
-            
+            with self._get_session() as session:
+                config_log = ConfigurationLog(
+                    config_key=config_key,
+                    old_value=old_value,
+                    new_value=new_value,
+                    change_reason=change_reason,
+                    changed_by=changed_by,
+                    environment=environment
+                )
+                
+                session.add(config_log)
+                session.flush()
+                
+                log_id = config_log.config_log_id
+                
+                logger.info(f"Logged configuration change for '{config_key}': {old_value} -> {new_value}")
+                return log_id
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to log configuration change: {e}")
             raise AuditLoggerError(f"Failed to log configuration change: {e}")
@@ -501,42 +534,45 @@ class ConfigurationLogger:
             List of configuration change records
         """
         try:
-            session = self._get_session()
-            
-            query = session.query(ConfigurationLog)
-            
-            # Add filters
-            query = query.filter(
-                ConfigurationLog.change_timestamp >= datetime.now() - datetime.timedelta(days=days)
-            )
-            
-            if config_key:
-                query = query.filter(ConfigurationLog.config_key == config_key)
-            
-            if environment:
-                query = query.filter(ConfigurationLog.environment == environment)
-            
-            changes = query.order_by(ConfigurationLog.change_timestamp.desc()).all()
-            
-            results = []
-            for change in changes:
-                results.append({
-                    'config_log_id': change.config_log_id,
-                    'config_key': change.config_key,
-                    'old_value': change.old_value,
-                    'new_value': change.new_value,
-                    'change_reason': change.change_reason,
-                    'changed_by': change.changed_by,
-                    'change_timestamp': change.change_timestamp,
-                    'environment': change.environment
-                })
-            
-            session.close()
-            return results
-            
+            with self._get_session() as session:
+                query = session.query(ConfigurationLog)
+                
+                # Add filters - use UTC for consistent time filtering
+                cutoff_time = datetime.now(timezone.utc) - timedelta(days=days)
+                query = query.filter(ConfigurationLog.change_timestamp >= cutoff_time)
+                
+                if config_key:
+                    query = query.filter(ConfigurationLog.config_key == config_key)
+                
+                if environment:
+                    query = query.filter(ConfigurationLog.environment == environment)
+                
+                changes = query.order_by(ConfigurationLog.change_timestamp.desc()).all()
+                
+                results = []
+                for change in changes:
+                    results.append({
+                        'config_log_id': change.config_log_id,
+                        'config_key': change.config_key,
+                        'old_value': change.old_value,
+                        'new_value': change.new_value,
+                        'change_reason': change.change_reason,
+                        'changed_by': change.changed_by,
+                        'change_timestamp': change.change_timestamp,
+                        'environment': change.environment
+                    })
+                
+                return results
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to get configuration history: {e}")
             raise AuditLoggerError(f"Failed to get configuration history: {e}")
+    
+    def close_connections(self) -> None:
+        """Close database connections."""
+        if self._engine:
+            self._engine.dispose()
+            self._engine = None
 
 
 class BatchLogger:
@@ -579,7 +615,8 @@ class BatchLogger:
         Returns:
             Batch ID for tracking
         """
-        self.current_batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # Use UTC for batch timestamps
+        self.current_batch_id = f"batch_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         
         metadata = {
             'batch_id': self.current_batch_id,
@@ -593,7 +630,7 @@ class BatchLogger:
             process_description=f"Batch processing {total_records} records in batches of {batch_size}",
             source_system=source_system,
             target_layer=target_layer,
-            metadata=metadata
+            metadata=metadata  # Will be stored as JSONB dict
         )
         
         logger.info(f"Started batch '{batch_name}' with ID {self.current_batch_id}")
