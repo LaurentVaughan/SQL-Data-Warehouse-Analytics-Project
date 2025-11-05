@@ -83,3 +83,21 @@ def batch_logger_factory():
         return BatchLogger(process_logger)
 
     return factory
+
+
+@pytest.fixture
+def patch_audit_create_engine(monkeypatch):
+    """
+    Patch create_engine in logs.audit_logger module.
+    
+    Returns a MagicMock that can be configured by tests to return
+    a mock engine.
+    
+    Usage in tests:
+        patch_audit_create_engine.return_value = mock_engine
+    """
+    from unittest.mock import MagicMock
+    
+    mock_create_engine = MagicMock()
+    monkeypatch.setattr("logs.audit_logger.create_engine", mock_create_engine)
+    return mock_create_engine

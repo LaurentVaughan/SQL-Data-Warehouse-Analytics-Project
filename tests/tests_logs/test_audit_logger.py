@@ -228,14 +228,17 @@ def test_get_session_context_manager(process_logger_factory):
     from unittest.mock import MagicMock, patch
     
     mock_session = FakeSession()
-    mock_sessionmaker = MagicMock(return_value=mock_session)
+    # sessionmaker returns a factory (callable), not the session directly
+    mock_session_factory = MagicMock(return_value=mock_session)
+    mock_sessionmaker = MagicMock(return_value=mock_session_factory)
     mock_engine = MagicMock()
     
     logger = process_logger_factory()
     
     # Mock _get_engine to avoid database connection
+    # Patch sessionmaker where it's imported (logs.audit_logger), not at source
     with patch.object(logger, "_get_engine", return_value=mock_engine):
-        with patch("sqlalchemy.orm.sessionmaker", return_value=mock_sessionmaker):
+        with patch("logs.audit_logger.sessionmaker", mock_sessionmaker):
             with logger._get_session() as session:
                 assert session is mock_session
             
@@ -254,14 +257,17 @@ def test_get_session_rollback_on_exception(process_logger_factory):
     from unittest.mock import MagicMock, patch
     
     mock_session = FakeSession()
-    mock_sessionmaker = MagicMock(return_value=mock_session)
+    # sessionmaker returns a factory (callable), not the session directly
+    mock_session_factory = MagicMock(return_value=mock_session)
+    mock_sessionmaker = MagicMock(return_value=mock_session_factory)
     mock_engine = MagicMock()
     
     logger = process_logger_factory()
     
     # Mock _get_engine to avoid database connection
+    # Patch sessionmaker where it's imported (logs.audit_logger), not at source
     with patch.object(logger, "_get_engine", return_value=mock_engine):
-        with patch("sqlalchemy.orm.sessionmaker", return_value=mock_sessionmaker):
+        with patch("logs.audit_logger.sessionmaker", mock_sessionmaker):
             with pytest.raises(RuntimeError):
                 with logger._get_session() as session:
                     raise RuntimeError("Test error")
