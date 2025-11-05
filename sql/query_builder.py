@@ -265,8 +265,11 @@ def cte_builder(
         cte_clause = f'{cte["name"]} AS (\n    {cte["query"]}\n)'
         cte_clauses.append(cte_clause)
     
+    # Join CTEs with comma and newline
+    cte_text = ',\n'.join(cte_clauses)
+    
     sql = f"""{with_keyword}
-{',\n'.join(cte_clauses)}
+{cte_text}
 {main_query}"""
     
     return sql
