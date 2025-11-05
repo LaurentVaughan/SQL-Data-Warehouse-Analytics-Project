@@ -50,15 +50,24 @@ import logging
 from typing import Dict, List, Optional
 from urllib.parse import quote_plus
 
-from sqlalchemy import Engine, MetaData, create_engine, text
+from sqlalchemy import MetaData, create_engine, text
+from sqlalchemy.engine import URL, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.schema import CreateSchema
 
 from sql.query_builder import check_schema_exists_sql, get_schema_info_sql
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Get logger for this module (don't configure root logger)
 logger = logging.getLogger(__name__)
+
+# Import LoggingInfrastructure but delay initialization to avoid circular dependencies
+# and to allow logs schema to be created first
+try:
+    from setup.create_logs import LoggingInfrastructure
+    LOGGING_AVAILABLE = True
+except ImportError:
+    LOGGING_AVAILABLE = False
+    logger.warning("LoggingInfrastructure not available - audit logging disabled")
 
 
 class SchemaCreationError(Exception):
@@ -135,15 +144,30 @@ class SchemaCreator:
         
         self._engine: Optional[Engine] = None
         self._metadata: Optional[MetaData] = None
+        self._logging_infra: Optional['LoggingInfrastructure'] = None
+        self._process_log_id: Optional[int] = None
         
     def _get_engine(self) -> Engine:
         """Get SQLAlchemy engine connected to target database."""
         if self._engine is None:
-            connection_string = (
-                f"postgresql://{self.user}:{quote_plus(self.password)}"
-                f"@{self.host}:{self.port}/{self.database}"
-            )
-            self._engine = create_engine(connection_string, echo=False)
+            # Use modern URL.create() for robust connection string building
+            try:
+                connection_url = URL.create(
+                    drivername='postgresql',
+                    username=self.user,
+                    password=self.password,
+                    host=self.host,
+                    port=self.port,
+                    database=self.database
+                )
+                self._engine = create_engine(connection_url, echo=False)
+            except AttributeError:
+                # Fallback for older SQLAlchemy versions
+                connection_string = (
+                    f"postgresql://{self.user}:{quote_plus(self.password)}"
+                    f"@{self.host}:{self.port}/{self.database}"
+                )
+                self._engine = create_engine(connection_string, echo=False)
         return self._engine
     
     def _get_metadata(self) -> MetaData:
@@ -151,6 +175,60 @@ class SchemaCreator:
         if self._metadata is None:
             self._metadata = MetaData()
         return self._metadata
+    
+    def _get_logging_infra(self) -> Optional['LoggingInfrastructure']:
+        """Get LoggingInfrastructure instance if available and logs schema exists."""
+        if not LOGGING_AVAILABLE:
+            return None
+            
+        if self._logging_infra is None:
+            # Only initialize if logs schema exists (to avoid chicken-and-egg problem)
+            try:
+                if self.check_schema_exists('logs'):
+                    self._logging_infra = LoggingInfrastructure(
+                        host=self.host,
+                        port=self.port,
+                        user=self.user,
+                        password=self.password,
+                        database=self.database
+                    )
+            except Exception as e:
+                logger.debug(f"Could not initialize LoggingInfrastructure: {e}")
+                return None
+                
+        return self._logging_infra
+    
+    def _start_process_logging(self, process_name: str, description: str) -> Optional[int]:
+        """Start process logging if available."""
+        logging_infra = self._get_logging_infra()
+        if logging_infra:
+            try:
+                self._process_log_id = logging_infra.log_process_start(
+                    process_name=process_name,
+                    process_description=description,
+                    target_layer='logs',
+                    created_by='SchemaCreator'
+                )
+                return self._process_log_id
+            except Exception as e:
+                logger.debug(f"Could not start process logging: {e}")
+        return None
+    
+    def _end_process_logging(self, status: str, error_message: str = None) -> None:
+        """End process logging if available."""
+        if self._process_log_id:
+            logging_infra = self._get_logging_infra()
+            if logging_infra:
+                try:
+                    logging_infra.log_process_end(
+                        log_id=self._process_log_id,
+                        status=status,
+                        error_message=error_message
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not end process logging: {e}")
+                finally:
+                    self._process_log_id = None
     
     def check_schema_exists(self, schema_name: str) -> bool:
         """
@@ -164,11 +242,15 @@ class SchemaCreator:
         """
         try:
             engine = self._get_engine()
-            with engine.connect() as conn:
+            with engine.begin() as conn:
                 # Use SQL from query_builder module
+                # check_schema_exists_sql returns: SELECT 1 FROM information_schema.schemata WHERE ...
+                # So we check if any row is returned (scalar would be 1 if exists, None if not)
                 sql = check_schema_exists_sql(schema_name)
                 result = conn.execute(text(sql))
-                return result.fetchone() is not None
+                # Check if query returned any rows
+                row = result.fetchone()
+                return row is not None
         except SQLAlchemyError as e:
             logger.error(f"Error checking schema existence: {e}")
             raise SchemaCreationError(f"Failed to check schema existence: {e}")
@@ -185,15 +267,23 @@ class SchemaCreator:
         Returns:
             True if schema was created, False if it already existed
         """
+        # Start process logging (will only work after logs schema is created)
+        self._start_process_logging(
+            f'create_schema_{schema_name}',
+            f'Create {schema_name} schema: {description}'
+        )
+        
         try:
             engine = self._get_engine()
             
             # Check if schema already exists
             if if_not_exists and self.check_schema_exists(schema_name):
                 logger.info(f"Schema '{schema_name}' already exists, skipping creation")
+                self._end_process_logging('SUCCESS')
                 return False
             
-            with engine.connect() as conn:
+            # Use begin() for automatic transaction management and commit
+            with engine.begin() as conn:
                 # Create schema
                 conn.execute(CreateSchema(schema_name, if_not_exists=if_not_exists))
                 
@@ -202,14 +292,19 @@ class SchemaCreator:
                     text(f"COMMENT ON SCHEMA {schema_name} IS :description"),
                     {"description": description}
                 )
-                
-                conn.commit()
+                # Transaction is automatically committed when exiting the context
                 
             logger.info(f"Created schema '{schema_name}': {description}")
+            self._end_process_logging('SUCCESS')
             return True
             
         except SQLAlchemyError as e:
             logger.error(f"Error creating schema '{schema_name}': {e}")
+            self._end_process_logging('FAILED', str(e))
+            raise SchemaCreationError(f"Failed to create schema '{schema_name}': {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error creating schema '{schema_name}': {e}")
+            self._end_process_logging('FAILED', str(e))
             raise SchemaCreationError(f"Failed to create schema '{schema_name}': {e}")
     
     def create_bronze_schema(self) -> bool:
@@ -234,8 +329,17 @@ class SchemaCreator:
         
         Returns:
             Dictionary mapping schema names to creation status (True=created, False=existed)
+            
+        Raises:
+            SchemaCreationError: If schema creation fails
         """
         logger.info("🚀 Creating medallion architecture schemas...")
+        
+        # Start overall process logging
+        self._start_process_logging(
+            'create_all_schemas',
+            'Create all medallion architecture schemas (bronze, silver, gold, logs)'
+        )
         
         results = {}
         
@@ -257,11 +361,18 @@ class SchemaCreator:
                 
             logger.info("✅ Medallion architecture schemas setup completed successfully")
             
+            self._end_process_logging('SUCCESS')
             return results
             
-        except Exception as e:
-            logger.error(f"Failed to create schemas: {e}")
+        except SchemaCreationError:
+            # Re-raise SchemaCreationError as-is
+            self._end_process_logging('FAILED')
             raise
+        except Exception as e:
+            # Wrap other exceptions in SchemaCreationError for consistency
+            logger.error(f"Failed to create schemas: {e}")
+            self._end_process_logging('FAILED', str(e))
+            raise SchemaCreationError(f"Failed to create schemas: {e}")
     
     def verify_all_schemas(self) -> Dict[str, bool]:
         """
@@ -293,7 +404,7 @@ class SchemaCreator:
         """
         try:
             engine = self._get_engine()
-            with engine.connect() as conn:
+            with engine.begin() as conn:
                 # Use SQL from query_builder module
                 sql = get_schema_info_sql(list(self.SCHEMAS.keys()))
                 result = conn.execute(text(sql))
@@ -314,6 +425,9 @@ class SchemaCreator:
     
     def close_connections(self) -> None:
         """Close database connections."""
+        if self._logging_infra:
+            self._logging_infra.close_connections()
+            self._logging_infra = None
         if self._engine:
             self._engine.dispose()
             self._engine = None
@@ -325,6 +439,12 @@ def main():
     Equivalent to running the original create_schemas.sql script.
     """
     import os
+
+    # Configure logging for CLI usage
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
 
     # Get database credentials from environment or use defaults
     db_config = {
