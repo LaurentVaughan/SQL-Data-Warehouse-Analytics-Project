@@ -264,7 +264,7 @@ def test_create_all_tables_raises_on_error(patch_logging_create_engine, logging_
 @pytest.mark.unit
 def test_log_process_start_creates_process_log(logging_infra_factory):
     """Unit test: Verify log_process_start creates ProcessLog with correct attributes."""
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     fake_session = FakeSession()
     logs = logging_infra_factory()
@@ -297,7 +297,7 @@ def test_log_process_start_creates_process_log(logging_infra_factory):
 @pytest.mark.unit
 def test_log_process_start_metadata_as_dict(logging_infra_factory):
     """Unit test: Verify metadata is stored as dict (not string) in JSONB column."""
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     fake_session = FakeSession()
     logs = logging_infra_factory()
@@ -333,7 +333,7 @@ def test_log_process_start_raises_on_error(logging_infra_factory):
 @pytest.mark.unit
 def test_log_process_end_updates_process_log(logging_infra_factory):
     """Unit test: Verify log_process_end updates ProcessLog with completion details."""
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     mock_process_log = ProcessLog(
         log_id=1,
@@ -368,7 +368,7 @@ def test_log_process_end_updates_process_log(logging_infra_factory):
 @pytest.mark.unit
 def test_log_process_end_process_not_found(logging_infra_factory):
     """Unit test: Verify log_process_end raises error when process log not found."""
-    from setup.create_logs import LoggingInfrastructureError, ProcessLog
+    from setup.create_logs import LoggingInfrastructureError; from models.logs_models import ProcessLog
     
     fake_session = FakeSession(query_results={ProcessLog: None})
     logs = logging_infra_factory()
@@ -383,7 +383,7 @@ def test_log_process_end_process_not_found(logging_infra_factory):
 @pytest.mark.unit
 def test_log_error_creates_error_log(logging_infra_factory):
     """Unit test: Verify log_error creates ErrorLog with correct attributes."""
-    from setup.create_logs import ErrorLog
+    from models.logs_models import ErrorLog
     
     fake_session = FakeSession()
     logs = logging_infra_factory()
@@ -410,7 +410,7 @@ def test_log_error_creates_error_log(logging_infra_factory):
 @pytest.mark.unit
 def test_log_data_lineage_creates_lineage(logging_infra_factory):
     """Unit test: Verify log_data_lineage creates DataLineage with correct attributes."""
-    from setup.create_logs import DataLineage
+    from models.logs_models import DataLineage
     
     fake_session = FakeSession()
     logs = logging_infra_factory()
@@ -441,7 +441,7 @@ def test_log_data_lineage_creates_lineage(logging_infra_factory):
 @pytest.mark.unit
 def test_get_process_status_returns_status_dict(logging_infra_factory):
     """Unit test: Verify get_process_status returns correct status dictionary."""
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     mock_process_log = ProcessLog(
         log_id=1,
@@ -468,7 +468,7 @@ def test_get_process_status_returns_status_dict(logging_infra_factory):
 @pytest.mark.unit
 def test_get_process_status_returns_none_when_not_found(logging_infra_factory):
     """Unit test: Verify get_process_status returns None when process not found."""
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     fake_session = FakeSession(query_results={ProcessLog: None})
     logs = logging_infra_factory()
@@ -553,7 +553,7 @@ def test_session_context_manager_rolls_back_on_error(logging_infra_factory, patc
 @pytest.mark.edge_case
 def test_log_process_start_with_none_metadata(logging_infra_factory):
     """Edge case test: Verify log_process_start handles None metadata correctly."""
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     fake_session = FakeSession()
     logs = logging_infra_factory()
@@ -569,7 +569,7 @@ def test_log_process_start_with_none_metadata(logging_infra_factory):
 @pytest.mark.edge_case
 def test_log_process_start_with_empty_dict_metadata(logging_infra_factory):
     """Edge case test: Verify log_process_start handles empty dict metadata."""
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     fake_session = FakeSession()
     logs = logging_infra_factory()
@@ -585,7 +585,7 @@ def test_log_process_start_with_empty_dict_metadata(logging_infra_factory):
 @pytest.mark.edge_case
 def test_log_process_end_with_failed_status_and_error_message(logging_infra_factory):
     """Edge case test: Verify log_process_end stores error message on failure."""
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     mock_process_log = ProcessLog(log_id=1, process_name='test', status='RUNNING')
     fake_session = FakeSession(query_results={ProcessLog: mock_process_log})
@@ -646,6 +646,6 @@ def test_logging_infrastructure_error_can_be_raised():
 @pytest.mark.smoke
 def test_base_metadata_exists():
     """Smoke test: Verify SQLAlchemy Base has metadata."""
-    from setup.create_logs import Base
+    from models.logs_models import Base
     assert hasattr(Base, 'metadata')
     assert Base.metadata is not None

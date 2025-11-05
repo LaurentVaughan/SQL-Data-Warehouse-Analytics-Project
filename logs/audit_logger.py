@@ -70,8 +70,8 @@ from sqlalchemy.engine import URL, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-# Import ORM models using proper package structure (no sys.path manipulation)
-from setup.create_logs import (
+# Import ORM models from centralized models package (prevents circular imports)
+from models.logs_models import (
     ConfigurationLog,
     DataLineage,
     ErrorLog,

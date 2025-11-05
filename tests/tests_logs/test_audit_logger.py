@@ -373,7 +373,7 @@ def test_end_process_success(patch_audit_create_engine, process_logger_factory):
     Tests that ProcessLogger.end_process() retrieves the ProcessLog by ID
     and updates it with end_time, status, and metrics using UTC timezone.
     """
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     fake_process_log = FakeProcessLog(log_id=1)
     mock_session = FakeSession(query_results={ProcessLog: fake_process_log})
@@ -416,7 +416,7 @@ def test_end_process_not_found_raises_error(patch_audit_create_engine, process_l
     the specified log_id doesn't exist in the database.
     """
     from logs.audit_logger import AuditLoggerError
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     mock_session = FakeSession(query_results={ProcessLog: None})
     mock_sessionmaker = MagicMock(return_value=mock_session)
@@ -440,7 +440,7 @@ def test_update_process_metrics_success(patch_audit_create_engine, process_logge
     Tests that ProcessLogger.update_process_metrics() retrieves the ProcessLog
     by ID and updates the specified metrics fields.
     """
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     fake_process_log = FakeProcessLog(log_id=1)
     mock_session = FakeSession(query_results={ProcessLog: fake_process_log})
@@ -475,7 +475,7 @@ def test_update_process_metrics_partial_update(patch_audit_create_engine, proces
     Tests that ProcessLogger.update_process_metrics() only updates the
     specified metrics, leaving None values unchanged.
     """
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     fake_process_log = FakeProcessLog(log_id=1, rows_processed=100)
     mock_session = FakeSession(query_results={ProcessLog: fake_process_log})
@@ -507,7 +507,7 @@ def test_get_active_processes_returns_running_processes(patch_audit_create_engin
     Tests that ProcessLogger.get_active_processes() queries for processes
     with status='RUNNING' and returns them as dictionaries.
     """
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     active_processes = [
         FakeProcessLog(log_id=1, process_name='process_1', status='RUNNING'),
@@ -539,7 +539,7 @@ def test_get_process_history_with_filters(patch_audit_create_engine, process_log
     Tests that ProcessLogger.get_process_history() applies filters for
     process_name, status, and time range using UTC timezone.
     """
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     now = datetime.now(timezone.utc)
     processes = [
@@ -661,7 +661,7 @@ def test_get_config_history_with_filters(patch_audit_create_engine, config_logge
     Tests that ConfigurationLogger.get_config_history() applies filters for
     config_key, environment, and time range using UTC timezone.
     """
-    from setup.create_logs import ConfigurationLog
+    from models.logs_models import ConfigurationLog
     
     now = datetime.now(timezone.utc)
     config_changes = [
@@ -824,7 +824,7 @@ def test_process_lifecycle_integration(patch_audit_create_engine, process_logger
     Tests the full workflow of starting a process, updating metrics,
     and ending the process.
     """
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     fake_process_log = FakeProcessLog(log_id=1)
     mock_session = FakeSession(query_results={ProcessLog: fake_process_log})
@@ -875,7 +875,7 @@ def test_batch_logger_integration_with_process_logger(patch_audit_create_engine,
     BatchLogger and ProcessLogger.
     """
     from logs.audit_logger import BatchLogger
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     fake_process_log = FakeProcessLog(log_id=1)
     mock_session = FakeSession(query_results={ProcessLog: fake_process_log})
@@ -927,7 +927,7 @@ def test_configuration_change_tracking_integration(patch_audit_create_engine, co
     Tests the complete workflow of logging configuration changes and
     retrieving change history.
     """
-    from setup.create_logs import ConfigurationLog
+    from models.logs_models import ConfigurationLog
     
     config_change = FakeConfigurationLog(config_log_id=1, config_key='batch_size')
     mock_session = FakeSession(query_results={ConfigurationLog: [config_change]})
@@ -994,7 +994,7 @@ def test_get_active_processes_empty_result(patch_audit_create_engine, process_lo
     Tests that ProcessLogger.get_active_processes() returns an empty list
     when no active processes exist.
     """
-    from setup.create_logs import ProcessLog
+    from models.logs_models import ProcessLog
     
     mock_session = FakeSession(query_results={ProcessLog: []})
     mock_sessionmaker = MagicMock(return_value=mock_session)
