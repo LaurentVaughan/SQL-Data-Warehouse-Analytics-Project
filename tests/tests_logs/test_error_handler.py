@@ -9,21 +9,21 @@ Tests cover:
 - Edge cases and error conditions
 """
 
-import pytest
 import time
-from unittest.mock import Mock, patch, MagicMock, call
 from datetime import datetime, timedelta
+from unittest.mock import MagicMock, Mock, call, patch
+
+import pytest
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from logs.error_handler import (
-    ErrorLogger,
-    ErrorRecovery,
     ErrorAnalyzer,
     ErrorHandlerError,
+    ErrorLogger,
+    ErrorRecovery,
 )
 from models.logs_models import ErrorLog, ProcessLog
-
 
 # ============================================================================
 # UNIT TESTS - ErrorLogger

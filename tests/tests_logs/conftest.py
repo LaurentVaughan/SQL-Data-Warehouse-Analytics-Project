@@ -139,6 +139,7 @@ def patch_analyzer_create_engine(monkeypatch):
 def mock_session():
     """Mock SQLAlchemy Session for testing database operations."""
     from unittest.mock import Mock
+
     from sqlalchemy.orm import Session
     
     session = Mock(spec=Session)

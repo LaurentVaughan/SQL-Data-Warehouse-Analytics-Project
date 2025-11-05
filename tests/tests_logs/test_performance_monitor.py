@@ -10,22 +10,22 @@ Tests cover:
 - Edge cases and error conditions
 """
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock, call
+from contextlib import contextmanager
 from datetime import datetime, timedelta
+from unittest.mock import MagicMock, Mock, call, patch
+
+import pytest
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
-from contextlib import contextmanager
 
 from logs.performance_monitor import (
-    PerformanceMonitor,
-    ProcessMonitor,
     MetricsCollector,
-    ThroughputAnalyzer,
+    PerformanceMonitor,
     PerformanceMonitorError,
+    ProcessMonitor,
+    ThroughputAnalyzer,
 )
 from models.logs_models import PerformanceMetrics
-
 
 # ============================================================================
 # UNIT TESTS - PerformanceMonitor
@@ -395,7 +395,7 @@ def test_identify_bottlenecks_returns_bottleneck_analysis():
 def test_performance_monitoring_lifecycle():
     """Test complete performance monitoring lifecycle."""
     from logs.performance_monitor import PerformanceMonitor, ProcessMonitor
-    
+
     # Create a fully mocked PerformanceMonitor
     mock_monitor = Mock(spec=PerformanceMonitor)
     mock_process_monitor = Mock(spec=ProcessMonitor)

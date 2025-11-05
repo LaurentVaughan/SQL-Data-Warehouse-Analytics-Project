@@ -10,19 +10,19 @@ Tests cover:
 - Edge cases and smoke tests
 """
 
+from unittest.mock import MagicMock, Mock, call, patch
+
 import pytest
-from unittest.mock import Mock, MagicMock, patch, call
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from logs.data_lineage import (
-    LineageTracker,
-    LineageAnalyzer,
-    ImpactAnalyzer,
     DataLineageError,
+    ImpactAnalyzer,
+    LineageAnalyzer,
+    LineageTracker,
 )
 from models.logs_models import DataLineage
-
 
 # ============================================================================
 # UNIT TESTS - LineageTracker
