@@ -50,37 +50,31 @@ Example:
     >>> logs.log_process_end(process_id, 'SUCCESS', rows_processed=1000)
 """
 
+import json
 import logging
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote_plus
-from uuid import uuid4
 
 from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
-    Engine,
     ForeignKey,
     Integer,
-    MetaData,
     Numeric,
     String,
-    Table,
     Text,
     create_engine,
-    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.engine import URL, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 from sqlalchemy.sql import func
 
-process_metadata = Column(JSONB, comment='Additional JSON metadata about the process')
-
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Get logger for this module (don't configure root logger)
 logger = logging.getLogger(__name__)
 
 # SQLAlchemy declarative base
@@ -120,7 +114,6 @@ class ProcessLog(Base):
     
     log_id = Column(Integer, primary_key=True, autoincrement=True,
                    comment='Unique identifier for each process log entry')
-
     process_name = Column(String(100), nullable=False,
                          comment='Name of the process (e.g., bronze_ingestion, silver_transform)')
     process_description = Column(Text,
@@ -326,18 +319,41 @@ class LoggingInfrastructure:
     def _get_engine(self) -> Engine:
         """Get SQLAlchemy engine connected to target database."""
         if self._engine is None:
-            connection_string = (
-                f"postgresql://{self.user}:{quote_plus(self.password)}"
-                f"@{self.host}:{self.port}/{self.database}"
-            )
-            self._engine = create_engine(connection_string, echo=False)
+            # Use modern URL.create() for robust connection string building
+            try:
+                connection_url = URL.create(
+                    drivername='postgresql',
+                    username=self.user,
+                    password=self.password,
+                    host=self.host,
+                    port=self.port,
+                    database=self.database
+                )
+                self._engine = create_engine(connection_url, echo=False)
+            except AttributeError:
+                # Fallback for older SQLAlchemy versions
+                connection_string = (
+                    f"postgresql://{self.user}:{quote_plus(self.password)}"
+                    f"@{self.host}:{self.port}/{self.database}"
+                )
+                self._engine = create_engine(connection_string, echo=False)
         return self._engine
     
-    def _get_session(self) -> Session:
-        """Get SQLAlchemy session."""
+    @contextmanager
+    def _get_session(self):
+        """Get SQLAlchemy session with proper resource management."""
         if self._session_factory is None:
             self._session_factory = sessionmaker(bind=self._get_engine())
-        return self._session_factory()
+        
+        session = self._session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
     
     def create_all_tables(self) -> Dict[str, bool]:
         """
@@ -392,32 +408,30 @@ class LoggingInfrastructure:
             source_system: Source system identifier
             target_layer: Target medallion layer
             created_by: User or system initiating the process
-            metadata: Additional metadata as dictionary
+            metadata: Additional metadata as dictionary (will be stored as JSONB)
             
         Returns:
             Process log ID for tracking
         """
         try:
-            session = self._get_session()
-            
-            process_log = ProcessLog(
-                process_name=process_name,
-                process_description=process_description,
-                source_system=source_system,
-                target_layer=target_layer,
-                created_by=created_by,
-                process_metadata=str(metadata) if metadata else None
-            )
-            
-            session.add(process_log)
-            session.commit()
-            
-            log_id = process_log.log_id
-            session.close()
-            
-            logger.info(f"Started process '{process_name}' with log_id {log_id}")
-            return log_id
-            
+            with self._get_session() as session:
+                process_log = ProcessLog(
+                    process_name=process_name,
+                    process_description=process_description,
+                    source_system=source_system,
+                    target_layer=target_layer,
+                    created_by=created_by,
+                    process_metadata=metadata  # Pass dict directly to JSONB column
+                )
+                
+                session.add(process_log)
+                session.flush()  # Get the ID before commit
+                
+                log_id = process_log.log_id
+                
+                logger.info(f"Started process '{process_name}' with log_id {log_id}")
+                return log_id
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to log process start: {e}")
             raise LoggingInfrastructureError(f"Failed to log process start: {e}")
@@ -445,25 +459,22 @@ class LoggingInfrastructure:
             error_message: Error message if status is FAILED
         """
         try:
-            session = self._get_session()
-            
-            process_log = session.query(ProcessLog).filter_by(log_id=log_id).first()
-            if not process_log:
-                raise LoggingInfrastructureError(f"Process log with ID {log_id} not found")
-            
-            process_log.end_time = func.now()
-            process_log.status = status
-            process_log.rows_processed = rows_processed
-            process_log.rows_inserted = rows_inserted
-            process_log.rows_updated = rows_updated
-            process_log.rows_deleted = rows_deleted
-            process_log.error_message = error_message
-            
-            session.commit()
-            session.close()
-            
-            logger.info(f"Completed process '{process_log.process_name}' with status {status}")
-            
+            with self._get_session() as session:
+                process_log = session.query(ProcessLog).filter_by(log_id=log_id).first()
+                if not process_log:
+                    raise LoggingInfrastructureError(f"Process log with ID {log_id} not found")
+                
+                # Use datetime.now() for Python attribute assignment
+                process_log.end_time = datetime.now()
+                process_log.status = status
+                process_log.rows_processed = rows_processed
+                process_log.rows_inserted = rows_inserted
+                process_log.rows_updated = rows_updated
+                process_log.rows_deleted = rows_deleted
+                process_log.error_message = error_message
+                
+                logger.info(f"Completed process '{process_log.process_name}' with status {status}")
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to log process end: {e}")
             raise LoggingInfrastructureError(f"Failed to log process end: {e}")
@@ -498,29 +509,27 @@ class LoggingInfrastructure:
             Error log ID
         """
         try:
-            session = self._get_session()
-            
-            error_log = ErrorLog(
-                process_log_id=process_log_id,
-                error_level=error_level,
-                error_code=error_code,
-                error_message=error_message,
-                error_detail=error_detail,
-                table_name=table_name,
-                column_name=column_name,
-                row_context=row_context,
-                recovery_suggestion=recovery_suggestion
-            )
-            
-            session.add(error_log)
-            session.commit()
-            
-            error_id = error_log.error_id
-            session.close()
-            
-            logger.error(f"Logged error {error_id}: {error_message}")
-            return error_id
-            
+            with self._get_session() as session:
+                error_log = ErrorLog(
+                    process_log_id=process_log_id,
+                    error_level=error_level,
+                    error_code=error_code,
+                    error_message=error_message,
+                    error_detail=error_detail,
+                    table_name=table_name,
+                    column_name=column_name,
+                    row_context=row_context,
+                    recovery_suggestion=recovery_suggestion
+                )
+                
+                session.add(error_log)
+                session.flush()
+                
+                error_id = error_log.error_id
+                
+                logger.error(f"Logged error {error_id}: {error_message}")
+                return error_id
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to log error: {e}")
             raise LoggingInfrastructureError(f"Failed to log error: {e}")
@@ -555,29 +564,27 @@ class LoggingInfrastructure:
             Data lineage ID
         """
         try:
-            session = self._get_session()
-            
-            lineage = DataLineage(
-                process_log_id=process_log_id,
-                source_schema=source_schema,
-                source_table=source_table,
-                source_column=source_column,
-                target_schema=target_schema,
-                target_table=target_table,
-                target_column=target_column,
-                transformation_logic=transformation_logic,
-                record_count=record_count
-            )
-            
-            session.add(lineage)
-            session.commit()
-            
-            lineage_id = lineage.lineage_id
-            session.close()
-            
-            logger.info(f"Logged lineage {lineage_id}: {source_schema}.{source_table} -> {target_schema}.{target_table}")
-            return lineage_id
-            
+            with self._get_session() as session:
+                lineage = DataLineage(
+                    process_log_id=process_log_id,
+                    source_schema=source_schema,
+                    source_table=source_table,
+                    source_column=source_column,
+                    target_schema=target_schema,
+                    target_table=target_table,
+                    target_column=target_column,
+                    transformation_logic=transformation_logic,
+                    record_count=record_count
+                )
+                
+                session.add(lineage)
+                session.flush()
+                
+                lineage_id = lineage.lineage_id
+                
+                logger.info(f"Logged lineage {lineage_id}: {source_schema}.{source_table} -> {target_schema}.{target_table}")
+                return lineage_id
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to log data lineage: {e}")
             raise LoggingInfrastructureError(f"Failed to log data lineage: {e}")
@@ -593,25 +600,23 @@ class LoggingInfrastructure:
             Dictionary with process status information
         """
         try:
-            session = self._get_session()
-            
-            process_log = session.query(ProcessLog).filter_by(log_id=log_id).first()
-            if not process_log:
-                return None
-            
-            result = {
-                'log_id': process_log.log_id,
-                'process_name': process_log.process_name,
-                'status': process_log.status,
-                'start_time': process_log.start_time,
-                'end_time': process_log.end_time,
-                'rows_processed': process_log.rows_processed,
-                'error_message': process_log.error_message
-            }
-            
-            session.close()
-            return result
-            
+            with self._get_session() as session:
+                process_log = session.query(ProcessLog).filter_by(log_id=log_id).first()
+                if not process_log:
+                    return None
+                
+                result = {
+                    'log_id': process_log.log_id,
+                    'process_name': process_log.process_name,
+                    'status': process_log.status,
+                    'start_time': process_log.start_time,
+                    'end_time': process_log.end_time,
+                    'rows_processed': process_log.rows_processed,
+                    'error_message': process_log.error_message
+                }
+                
+                return result
+                
         except SQLAlchemyError as e:
             logger.error(f"Failed to get process status: {e}")
             raise LoggingInfrastructureError(f"Failed to get process status: {e}")
@@ -629,6 +634,12 @@ def main():
     Equivalent to running the original create_logs.sql script.
     """
     import os
+
+    # Configure logging for CLI usage
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
 
     # Get database credentials from environment or use defaults
     db_config = {
