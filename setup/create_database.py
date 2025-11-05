@@ -53,6 +53,7 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extensions import ISOLATION_LEVEL_AUTOCOMMIT
 from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import SQLAlchemyError
 
 from sql.ddl import create_database_sql, drop_database_sql, terminate_connections_sql
@@ -147,15 +148,32 @@ class DatabaseCreator:
     def _get_admin_engine(self) -> Engine:
         """Get SQLAlchemy engine connected to admin database."""
         if self._admin_engine is None:
-            connection_string = (
-                f"postgresql://{self.user}:{quote_plus(self.password)}"
-                f"@{self.host}:{self.port}/{self.admin_db}"
-            )
-            self._admin_engine = create_engine(
-                connection_string,
-                isolation_level='AUTOCOMMIT',
-                echo=False
-            )
+            # Use modern URL.create() for robust connection string building
+            try:
+                connection_url = URL.create(
+                    drivername='postgresql',
+                    username=self.user,
+                    password=self.password,
+                    host=self.host,
+                    port=self.port,
+                    database=self.admin_db
+                )
+                self._admin_engine = create_engine(
+                    connection_url,
+                    isolation_level='AUTOCOMMIT',
+                    echo=False
+                )
+            except AttributeError:
+                # Fallback for older SQLAlchemy versions
+                connection_string = (
+                    f"postgresql://{self.user}:{quote_plus(self.password)}"
+                    f"@{self.host}:{self.port}/{self.admin_db}"
+                )
+                self._admin_engine = create_engine(
+                    connection_string,
+                    isolation_level='AUTOCOMMIT',
+                    echo=False
+                )
         return self._admin_engine
     
     def check_database_exists(self) -> bool:
