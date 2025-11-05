@@ -67,7 +67,9 @@ __all__ = [
     'LineageTracker', 'LineageAnalyzer'
 ]
 
-from .audit_logger import ConfigurationLogger, ProcessLogger
-from .data_lineage import LineageAnalyzer, LineageTracker
-from .error_handler import ErrorLogger, ErrorRecovery
-from .performance_monitor import MetricsCollector, PerformanceMonitor
+# Note: Eager imports removed to prevent circular dependencies.
+# Import modules directly when needed:
+#   from logs.audit_logger import ProcessLogger, ConfigurationLogger
+#   from logs.error_handler import ErrorLogger, ErrorRecovery
+#   from logs.performance_monitor import PerformanceMonitor, MetricsCollector
+#   from logs.data_lineage import LineageTracker, LineageAnalyzer
