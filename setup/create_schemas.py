@@ -374,6 +374,56 @@ class SchemaCreator:
             self._end_process_logging('FAILED', str(e))
             raise SchemaCreationError(f"Failed to create schemas: {e}")
     
+    def drop_all_schemas(self) -> bool:
+        """
+        Drop all medallion architecture schemas.
+        
+        Drops schemas in reverse order (gold -> silver -> bronze -> logs)
+        to handle dependencies properly.
+        
+        Returns:
+            True if all schemas were dropped successfully, False otherwise
+            
+        Raises:
+            SchemaCreationError: If schema drop fails critically
+            
+        Warning:
+            This is a destructive operation. All data will be lost.
+        """
+        from sql.ddl import drop_schema
+        
+        logger.info("🗑️ Dropping medallion architecture schemas...")
+        
+        results = {}
+        # Drop in reverse order to handle dependencies
+        schema_names = ['gold', 'silver', 'bronze', 'logs']
+        
+        try:
+            engine = self._get_engine()
+            with engine.begin() as conn:
+                for schema_name in schema_names:
+                    try:
+                        # Use sql/ddl utility to generate DROP SCHEMA statement
+                        drop_sql = drop_schema(schema_name, if_exists=True, cascade=True)
+                        conn.execute(text(drop_sql))
+                        logger.info(f"✅ Dropped schema: {schema_name}")
+                        results[schema_name] = True
+                    except SQLAlchemyError as e:
+                        logger.warning(f"⚠️ Could not drop schema {schema_name}: {e}")
+                        results[schema_name] = False
+                
+            # Return True only if all schemas were dropped
+            success = all(results.values())
+            if success:
+                logger.info("✅ All schemas dropped successfully")
+            else:
+                logger.warning("⚠️ Some schemas could not be dropped")
+            return success
+                
+        except Exception as e:
+            logger.error(f"Failed to drop schemas: {e}")
+            raise SchemaCreationError(f"Failed to drop schemas: {e}")
+    
     def verify_all_schemas(self) -> Dict[str, bool]:
         """
         Verify that all required schemas exist.
