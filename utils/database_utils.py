@@ -1,285 +1,372 @@
 """
-===========================================================
-Database utility functions for verification and inspection.
-===========================================================
+==================================================
+Database connectivity utilities for PostgreSQL.
+==================================================
 
-Provides utility functions for database verification, inspection, and
-management using SQLAlchemy and PostgreSQL system catalogs.
+Provides reusable connection helpers, health checks, and database
+availability verification for the data warehouse infrastructure.
 
-Functions:
-    get_engine: Create SQLAlchemy engine with connection parameters
-    check_database_exists: Check if a database exists
-    get_database_info: Get detailed database configuration
-    verify_database_creation: Verify database creation with expected settings
+This module abstracts PostgreSQL connection logic from business logic,
+enabling consistent connection handling across setup, ETL, and monitoring.
+
+Key Features:
+    - Connection string building from config
+    - Database availability checking
+    - Connection pooling setup
+    - Health check utilities
+    - Timeout and retry logic
 
 Example:
-    >>> from utils.database_utils import verify_database_creation
-    >>> 
-    >>> db_info = verify_database_creation(
-    ...     host='localhost',
-    ...     port=5432,
-    ...     user='postgres',
-    ...     password='password',
-    ...     admin_db='postgres',
-    ...     target_db='warehouse',
-    ...     expected_encoding='UTF8'
+    >>> from utils.database_utils import (
+    ...     check_database_available,
+    ...     wait_for_database,
+    ...     get_connection_string
     ... )
-    >>> print(f"Database size: {db_info['size']}")
+    >>> 
+    >>> # Check if database is available
+    >>> if check_database_available('localhost', 5432, 'postgres', 'password'):
+    ...     print("Database ready")
+    >>> 
+    >>> # Wait for database with retries
+    >>> wait_for_database('localhost', 5432, max_retries=5)
+    >>> 
+    >>> # Get connection string
+    >>> conn_str = get_connection_string(use_warehouse=True)
 """
 
 import logging
-from typing import Any, Dict, Optional
+import time
+from typing import Optional, Tuple
 from urllib.parse import quote_plus
 
-from sqlalchemy import Engine, create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
+import psycopg2
+from psycopg2 import OperationalError
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import URL, Engine
+from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
+
+from core.config import config
 
 logger = logging.getLogger(__name__)
 
 
-class DatabaseUtilsError(Exception):
-    """Exception raised for database utility operation errors.
-    
-    Raised when database verification, inspection, or connection
-    operations fail.
-    """
+class DatabaseConnectionError(Exception):
+    """Exception raised when database connection fails."""
     pass
 
 
-def get_engine(
-    host: str,
-    port: int,
-    user: str,
-    password: str,
-    database: str,
-    isolation_level: Optional[str] = None
-) -> Engine:
-    """Create a SQLAlchemy engine for database connections.
+def get_connection_string(
+    host: str = None,
+    port: int = None,
+    user: str = None,
+    password: str = None,
+    database: str = None,
+    use_warehouse: bool = False
+) -> str:
+    """
+    Build PostgreSQL connection string.
     
     Args:
-        host: Database server hostname or IP address
-        port: Database server port number
-        user: Database username
-        password: Database password
-        database: Database name to connect to
-        isolation_level: SQL isolation level (e.g., 'AUTOCOMMIT')
+        host: Database hostname (defaults to config.db_host)
+        port: Database port (defaults to config.db_port)
+        user: Database user (defaults to config.db_user)
+        password: Database password (defaults to config.db_password)
+        database: Database name (defaults to config.db_name or warehouse_db_name)
+        use_warehouse: If True, use warehouse database name from config
         
     Returns:
-        Configured SQLAlchemy Engine instance
+        PostgreSQL connection string
         
     Example:
-        >>> engine = get_engine('localhost', 5432, 'user', 'pwd', 'mydb')
+        >>> conn_str = get_connection_string(use_warehouse=True)
+        >>> # Returns: postgresql://user:pass@localhost:5432/warehouse_db
+    """
+    host = host if host is not None else config.db_host
+    port = port if port is not None else config.db_port
+    user = user if user is not None else config.db_user
+    password = password if password is not None else config.db_password
+    
+    if database is None:
+        database = config.warehouse_db_name if use_warehouse else config.db_name
+    
+    return f"postgresql://{user}:{quote_plus(password)}@{host}:{port}/{database}"
+
+
+def create_sqlalchemy_engine(
+    host: str = None,
+    port: int = None,
+    user: str = None,
+    password: str = None,
+    database: str = None,
+    use_warehouse: bool = False,
+    echo: bool = False,
+    pool_size: int = 5,
+    max_overflow: int = 10
+) -> Engine:
+    """
+    Create SQLAlchemy engine with connection pooling.
+    
+    Args:
+        host: Database hostname
+        port: Database port
+        user: Database user
+        password: Database password
+        database: Database name
+        use_warehouse: If True, use warehouse database
+        echo: Enable SQL statement logging
+        pool_size: Connection pool size
+        max_overflow: Maximum overflow connections
+        
+    Returns:
+        Configured SQLAlchemy Engine
+        
+    Example:
+        >>> engine = create_sqlalchemy_engine(use_warehouse=True)
         >>> with engine.connect() as conn:
         ...     result = conn.execute(text("SELECT 1"))
     """
-    connection_string = (
-        f"postgresql://{user}:{quote_plus(password)}"
-        f"@{host}:{port}/{database}"
-    )
-    
-    engine_kwargs = {'echo': False}
-    if isolation_level:
-        engine_kwargs['isolation_level'] = isolation_level
-    
-    return create_engine(connection_string, **engine_kwargs)
+    try:
+        # Use modern URL.create() for robust connection string building
+        connection_url = URL.create(
+            drivername='postgresql',
+            username=user or config.db_user,
+            password=password or config.db_password,
+            host=host or config.db_host,
+            port=port or config.db_port,
+            database=database or (
+                config.warehouse_db_name if use_warehouse else config.db_name
+            )
+        )
+        
+        return create_engine(
+            connection_url,
+            echo=echo,
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+            pool_pre_ping=True  # Verify connections before using
+        )
+    except AttributeError:
+        # Fallback for older SQLAlchemy versions
+        conn_str = get_connection_string(host, port, user, password, database, use_warehouse)
+        return create_engine(
+            conn_str,
+            echo=echo,
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+            pool_pre_ping=True
+        )
 
 
-def check_database_exists(
-    host: str,
-    port: int,
-    user: str,
-    password: str,
-    admin_db: str,
-    target_db: str
+def check_database_available(
+    host: str = None,
+    port: int = None,
+    user: str = None,
+    password: str = None,
+    database: str = None,
+    timeout: int = 5
 ) -> bool:
-    """Check if a database exists.
-    
-    Connects to admin database and queries pg_database catalog to check
-    if the target database exists.
+    """
+    Check if PostgreSQL database is available.
     
     Args:
-        host: Database server hostname
-        port: Database server port
-        user: Database username
-        password: Database password
-        admin_db: Admin database name (typically 'postgres')
-        target_db: Target database name to check
+        host: Database hostname (defaults to config)
+        port: Database port (defaults to config)
+        user: Database user (defaults to config)
+        password: Database password (defaults to config)
+        database: Database name (defaults to config.db_name)
+        timeout: Connection timeout in seconds
+        
+    Returns:
+        True if database is available, False otherwise
+        
+    Example:
+        >>> if check_database_available():
+        ...     print("PostgreSQL is ready")
+    """
+    host = host or config.db_host
+    port = port or config.db_port
+    user = user or config.db_user
+    password = password or config.db_password
+    database = database or config.db_name
+    
+    try:
+        conn = psycopg2.connect(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            database=database,
+            connect_timeout=timeout
+        )
+        conn.close()
+        return True
+    except OperationalError as e:
+        logger.debug(f"Database not available: {e}")
+        return False
+
+
+def wait_for_database(
+    host: str = None,
+    port: int = None,
+    user: str = None,
+    password: str = None,
+    database: str = None,
+    max_retries: int = 10,
+    retry_delay: int = 2,
+    timeout: int = 5
+) -> bool:
+    """
+    Wait for PostgreSQL database to become available with retries.
+    
+    Args:
+        host: Database hostname (defaults to config)
+        port: Database port (defaults to config)
+        user: Database user (defaults to config)
+        password: Database password (defaults to config)
+        database: Database name (defaults to config.db_name)
+        max_retries: Maximum number of retry attempts
+        retry_delay: Delay between retries in seconds
+        timeout: Connection timeout per attempt in seconds
+        
+    Returns:
+        True if database became available, False if all retries exhausted
+        
+    Raises:
+        DatabaseConnectionError: If database never becomes available
+        
+    Example:
+        >>> wait_for_database(max_retries=5, retry_delay=3)
+        >>> # Waits up to 15 seconds for database
+    """
+    host = host or config.db_host
+    port = port or config.db_port
+    database = database or config.db_name
+    
+    logger.info(f"Waiting for PostgreSQL at {host}:{port}/{database}...")
+    
+    for attempt in range(1, max_retries + 1):
+        if check_database_available(host, port, user, password, database, timeout):
+            logger.info(f"✅ PostgreSQL is available (attempt {attempt}/{max_retries})")
+            return True
+        
+        if attempt < max_retries:
+            logger.warning(
+                f"⏳ PostgreSQL not available yet (attempt {attempt}/{max_retries}), "
+                f"retrying in {retry_delay}s..."
+            )
+            time.sleep(retry_delay)
+    
+    error_msg = (
+        f"PostgreSQL at {host}:{port}/{database} did not become available "
+        f"after {max_retries} attempts"
+    )
+    logger.error(f"❌ {error_msg}")
+    raise DatabaseConnectionError(error_msg)
+
+
+def verify_database_exists(
+    database_name: str,
+    host: str = None,
+    port: int = None,
+    user: str = None,
+    password: str = None
+) -> bool:
+    """
+    Verify if a specific database exists in PostgreSQL.
+    
+    Args:
+        database_name: Name of database to check
+        host: Database hostname (defaults to config)
+        port: Database port (defaults to config)
+        user: Database user (defaults to config)
+        password: Database password (defaults to config)
         
     Returns:
         True if database exists, False otherwise
         
-    Raises:
-        DatabaseUtilsError: If connection or query fails
-        
     Example:
-        >>> exists = check_database_exists(
-        ...     'localhost', 5432, 'postgres', 'pwd', 'postgres', 'warehouse'
-        ... )
-        >>> if exists:
-        ...     print("Database found")
+        >>> if verify_database_exists('sql_retail_analytics_warehouse'):
+        ...     print("Warehouse database exists")
     """
     try:
-        engine = get_engine(host, port, user, password, admin_db)
+        # Connect to default 'postgres' database to check if target exists
+        engine = create_sqlalchemy_engine(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            database='postgres',  # Connect to default database
+            use_warehouse=False
+        )
+        
         with engine.connect() as conn:
             result = conn.execute(
                 text("SELECT 1 FROM pg_database WHERE datname = :db_name"),
-                {"db_name": target_db}
+                {"db_name": database_name}
             )
             exists = result.fetchone() is not None
         
         engine.dispose()
         return exists
         
-    except SQLAlchemyError as e:
-        logger.error(f"Error checking database existence: {e}")
-        raise DatabaseUtilsError(f"Failed to check database existence: {e}")
+    except Exception as e:
+        logger.error(f"Failed to verify database existence: {e}")
+        return False
 
 
-def get_database_info(
-    host: str,
-    port: int,
-    user: str,
-    password: str,
-    admin_db: str,
-    target_db: str
-) -> Dict[str, Any]:
-    """Get detailed information about a database.
+def get_database_connection_info() -> dict:
+    """
+    Get current database connection configuration.
     
-    Retrieves database configuration including encoding, collation,
-    locale settings, and size from PostgreSQL system catalogs.
-    
-    Args:
-        host: Database server hostname
-        port: Database server port
-        user: Database username
-        password: Database password
-        admin_db: Admin database name (typically 'postgres')
-        target_db: Target database name
-        
     Returns:
-        Dictionary with keys:
-            - database: Database name
-            - encoding: Character encoding (e.g., 'UTF8')
-            - lc_collate: Collation setting
-            - lc_ctype: Character classification setting
-            - size: Human-readable database size
-            
-    Raises:
-        DatabaseUtilsError: If database not found or query fails
+        Dictionary with connection parameters
         
     Example:
-        >>> info = get_database_info(
-        ...     'localhost', 5432, 'postgres', 'pwd', 'postgres', 'warehouse'
-        ... )
-        >>> print(f"Encoding: {info['encoding']}, Size: {info['size']}")
+        >>> info = get_database_connection_info()
+        >>> print(f"Connecting to {info['host']}:{info['port']}")
     """
-    try:
-        engine = get_engine(host, port, user, password, admin_db)
-        with engine.connect() as conn:
-            result = conn.execute(
-                text("""
-                    SELECT 
-                        datname,
-                        pg_encoding_to_char(encoding) AS encoding,
-                        datcollate AS lc_collate,
-                        datctype AS lc_ctype,
-                        pg_size_pretty(pg_database_size(datname)) AS size
-                    FROM pg_database
-                    WHERE datname = :db_name
-                """),
-                {"db_name": target_db}
-            )
-            
-            row = result.fetchone()
-            if not row:
-                raise DatabaseUtilsError(f"Database {target_db} not found")
-            
-            db_info = {
-                'database': row.datname,
-                'encoding': row.encoding,
-                'lc_collate': row.lc_collate,
-                'lc_ctype': row.lc_ctype,
-                'size': row.size
-            }
-        
-        engine.dispose()
-        return db_info
-        
-    except SQLAlchemyError as e:
-        logger.error(f"Error getting database info: {e}")
-        raise DatabaseUtilsError(f"Failed to get database info: {e}")
+    return {
+        'host': config.db_host,
+        'port': config.db_port,
+        'user': config.db_user,
+        'admin_database': config.db_name,
+        'warehouse_database': config.warehouse_db_name
+    }
 
 
-def verify_database_creation(
-    host: str,
-    port: int,
-    user: str,
-    password: str,
-    admin_db: str,
-    target_db: str,
-    expected_encoding: str = 'UTF8',
-    expected_collate: str = 'en_GB.UTF-8'
-) -> Dict[str, Any]:
-    """Verify database creation and return database details.
+def verify_connection() -> Tuple[bool, Optional[str]]:
+    """
+    Verify database connection and return status with details.
     
-    Checks that database exists and optionally validates encoding and
-    collation settings match expected values. Logs warnings for mismatches
-    but does not raise errors.
-    
-    Args:
-        host: Database server hostname
-        port: Database server port
-        user: Database username
-        password: Database password
-        admin_db: Admin database name (typically 'postgres')
-        target_db: Target database name to verify
-        expected_encoding: Expected character encoding (default 'UTF8')
-        expected_collate: Expected collation (default 'en_GB.UTF-8')
-        
     Returns:
-        Dictionary containing database configuration details (see get_database_info)
-        
-    Raises:
-        DatabaseUtilsError: If database doesn't exist or verification fails
+        Tuple of (success: bool, message: str)
         
     Example:
-        >>> db_info = verify_database_creation(
-        ...     host='localhost',
-        ...     port=5432,
-        ...     user='postgres',
-        ...     password='password',
-        ...     admin_db='postgres',
-        ...     target_db='warehouse',
-        ...     expected_encoding='UTF8',
-        ...     expected_collate='en_GB.UTF-8'
-        ... )
-        >>> print(f"Database verified: {db_info['database']}")
+        >>> success, message = verify_connection()
+        >>> if success:
+        ...     print(f"✅ {message}")
+        ... else:
+        ...     print(f"❌ {message}")
     """
     try:
-        # Check if database exists
-        if not check_database_exists(host, port, user, password, admin_db, target_db):
-            raise DatabaseUtilsError(f"Database {target_db} does not exist")
+        if not check_database_available():
+            return False, "PostgreSQL server not available"
         
-        # Get database info
-        db_info = get_database_info(host, port, user, password, admin_db, target_db)
+        # Test warehouse database if it exists
+        warehouse_exists = verify_database_exists(config.warehouse_db_name)
         
-        # Verify encoding
-        if db_info['encoding'] != expected_encoding:
-            logger.warning(
-                f"Encoding mismatch: expected {expected_encoding}, "
-                f"got {db_info['encoding']}"
+        if warehouse_exists:
+            message = (
+                f"Connected to PostgreSQL at {config.db_host}:{config.db_port}. "
+                f"Warehouse database '{config.warehouse_db_name}' exists."
+            )
+        else:
+            message = (
+                f"Connected to PostgreSQL at {config.db_host}:{config.db_port}. "
+                f"Warehouse database '{config.warehouse_db_name}' does not exist yet."
             )
         
-        # Verify collation
-        if db_info['lc_collate'] != expected_collate:
-            logger.warning(
-                f"Collation mismatch: expected {expected_collate}, "
-                f"got {db_info['lc_collate']}"
-            )
-        
-        logger.info(f"Database {target_db} verified successfully")
-        return db_info
+        return True, message
         
     except Exception as e:
-        logger.error(f"Error verifying database creation: {e}")
-        raise DatabaseUtilsError(f"Failed to verify database creation: {e}")
+        return False, f"Connection test failed: {str(e)}"
