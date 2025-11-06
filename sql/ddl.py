@@ -385,6 +385,39 @@ def alter_table_add_column(
     return sql + ";"
 
 
+def drop_schema(
+    schema_name: str,
+    if_exists: bool = True,
+    cascade: bool = True
+) -> str:
+    """Generate DROP SCHEMA statement.
+    
+    Args:
+        schema_name: Name of the schema to drop
+        if_exists: If True, add IF EXISTS clause
+        cascade: If True, drop all contained objects automatically
+        
+    Returns:
+        SQL DROP SCHEMA statement
+        
+    Example:
+        >>> sql = drop_schema('bronze', cascade=True)
+        >>> print(sql)
+        DROP SCHEMA IF EXISTS "bronze" CASCADE;
+    """
+    sql = "DROP SCHEMA"
+    
+    if if_exists:
+        sql += " IF EXISTS"
+    
+    sql += f' "{schema_name}"'
+    
+    if cascade:
+        sql += " CASCADE"
+    
+    return sql + ";"
+
+
 def drop_table(
     schema: str,
     table: str,
