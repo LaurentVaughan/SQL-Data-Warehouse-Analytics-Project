@@ -208,6 +208,8 @@ class SetupOrchestrator:
     
     def _start_setup_step(self, step_name: str, step_description: str) -> int:
         """Start a setup step with logging."""
+        self.current_step = step_name
+        
         if self.process_logger is None:
             # Create basic logger without full infrastructure if not available yet
             try:
@@ -696,19 +698,16 @@ class SetupOrchestrator:
                     logger.error("Failed to drop database")
                     return False
             else:
-                # Drop schemas only
+                # Drop schemas using schema_creator
                 if self.schema_creator:
-                    engine = self.schema_creator._get_engine()
-                    with engine.connect() as conn:
-                        # Updated schema list - removed 'setup' which no longer exists
-                        for schema in ['logs', 'gold', 'silver', 'bronze']:
-                            try:
-                                conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-                                logger.info(f"Dropped schema: {schema}")
-                            except Exception as e:
-                                logger.warning(f"Could not drop schema {schema}: {e}")
-                        conn.commit()
-                    return True
+                    success = self.schema_creator.drop_all_schemas()
+                    if success:
+                        logger.info("Schemas dropped successfully")
+                        return True
+                    else:
+                        logger.error("Failed to drop schemas")
+                        return False
+                return True
                     
         except Exception as e:
             logger.error(f"Rollback failed: {e}")
