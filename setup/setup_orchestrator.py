@@ -211,19 +211,10 @@ class SetupOrchestrator:
         self.current_step = step_name
         
         if self.process_logger is None:
-            # Create basic logger without full infrastructure if not available yet
-            try:
-                self.process_logger = ProcessLogger(
-                    host=self.host,
-                    port=self.port,
-                    user=self.user,
-                    password=self.password,
-                    database=self.target_db
-                )
-            except:
-                # If logging infrastructure doesn't exist yet, use basic logging
-                logger.info(f"Starting setup step: {step_name}")
-                return 0
+            # Logging infrastructure doesn't exist yet during initial setup
+            # Use console logging only
+            logger.info(f"Starting setup step: {step_name} - {step_description}")
+            return 0
         
         try:
             process_id = self.process_logger.start_process(
@@ -302,24 +293,20 @@ class SetupOrchestrator:
                 self._initialize_components()
             
             # Check if database already exists
-            if self.db_creator.database_exists():
+            if self.db_creator.check_database_exists():
                 logger.info(f"Database {self.target_db} already exists")
                 self._end_setup_step(process_id, 'SUCCESS')
                 return True
             
-            # Create the database
-            result = self.db_creator.create_warehouse_database()
+            # Create the database (raises DatabaseCreationError if fails)
+            self.db_creator.create_database()
             
-            if result:
-                # Verify creation
-                if self.db_creator.verify_database_creation():
-                    self._end_setup_step(process_id, 'SUCCESS')
-                    return True
-                else:
-                    self._end_setup_step(process_id, 'FAILED', 'Database verification failed')
-                    return False
+            # Verify creation
+            if self.db_creator.check_database_exists():
+                self._end_setup_step(process_id, 'SUCCESS')
+                return True
             else:
-                self._end_setup_step(process_id, 'FAILED', 'Database creation failed')
+                self._end_setup_step(process_id, 'FAILED', 'Database verification failed')
                 return False
                 
         except Exception as e:
