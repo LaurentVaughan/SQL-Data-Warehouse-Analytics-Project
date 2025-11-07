@@ -324,6 +324,113 @@ def test_orchestrator_init_with_monitoring(mock_config):
 
 
 @pytest.mark.unit
+def test_verify_setup_complete_database_exists(orchestrator, mock_database_utils):
+    """
+    Test verify_setup_complete when warehouse database exists.
+    
+    Verifies:
+    - Returns True when database exists
+    - Calls verify_database_exists with correct database name
+    """
+    mock_database_utils['verify_database_exists'].return_value = True
+    
+    result = orchestrator.verify_setup_complete()
+    
+    assert result is True
+    mock_database_utils['verify_database_exists'].assert_called_once_with('sql_retail_analytics_warehouse')
+
+
+@pytest.mark.unit
+def test_verify_setup_complete_database_not_exists(orchestrator, mock_database_utils):
+    """
+    Test verify_setup_complete when warehouse database doesn't exist.
+    
+    Verifies:
+    - Returns False when database doesn't exist
+    - Calls verify_database_exists with correct database name
+    """
+    mock_database_utils['verify_database_exists'].return_value = False
+    
+    result = orchestrator.verify_setup_complete()
+    
+    assert result is False
+    mock_database_utils['verify_database_exists'].assert_called_once_with('sql_retail_analytics_warehouse')
+
+
+@pytest.mark.unit
+def test_verify_setup_complete_exception_handling(orchestrator, mock_database_utils):
+    """
+    Test verify_setup_complete when exception occurs.
+    
+    Verifies:
+    - Returns False when exception is raised
+    - Exception is caught and logged
+    """
+    mock_database_utils['verify_database_exists'].side_effect = Exception("Connection error")
+    
+    result = orchestrator.verify_setup_complete()
+    
+    assert result is False
+
+
+@pytest.mark.unit
+def test_run_setup_skip_if_already_complete(orchestrator, mock_database_utils, mock_logging_components, mock_setup_orchestrator):
+    """
+    Test run_setup skips setup when database already exists (not force_recreate).
+    
+    Verifies:
+    - Setup is skipped when verify_setup_complete returns True
+    - SetupOrchestrator.run_complete_setup is NOT called
+    - initialize_logging_infrastructure IS called
+    - Returns results with already_complete=True
+    - Appropriate messages logged
+    """
+    # Setup: Database already exists
+    mock_database_utils['verify_database_exists'].return_value = True
+    
+    results = orchestrator.run_setup(include_samples=False, force_recreate=False)
+    
+    # Verify setup was skipped
+    assert results['already_complete'] is True
+    assert results['database'] is True
+    assert results['schemas'] is True
+    assert results['logging'] is True
+    
+    # Verify SetupOrchestrator was NOT initialized or called
+    assert orchestrator.setup_orchestrator is None
+    
+    # Verify logging infrastructure WAS initialized
+    assert isinstance(orchestrator.process_logger, FakeProcessLogger)
+    assert isinstance(orchestrator.error_logger, FakeErrorLogger)
+
+
+@pytest.mark.unit
+def test_run_setup_force_recreate_ignores_existing(orchestrator, mock_database_utils, mock_logging_components, mock_setup_orchestrator):
+    """
+    Test run_setup with force_recreate ignores existing database.
+    
+    Verifies:
+    - Setup runs even when database exists if force_recreate=True
+    - SetupOrchestrator.run_complete_setup IS called
+    - No already_complete flag in results
+    """
+    # Setup: Database already exists
+    mock_database_utils['verify_database_exists'].return_value = True
+    
+    results = orchestrator.run_setup(include_samples=False, force_recreate=True)
+    
+    # Verify setup was NOT skipped
+    assert 'already_complete' not in results
+    assert results['database'] is True
+    assert results['schemas'] is True
+    assert results['logging'] is True
+    
+    # Verify SetupOrchestrator WAS called
+    assert orchestrator.setup_orchestrator is not None
+    assert orchestrator.setup_orchestrator.run_complete_setup_called is True
+
+
+@pytest.mark.unit
 def test_verify_prerequisites_success(orchestrator, mock_database_utils):
     """
     Test prerequisite verification when all checks pass.
@@ -499,7 +606,8 @@ def test_run_setup_success_no_samples(orchestrator, mock_database_utils, mock_lo
     - Logging infrastructure initialized after setup
     - Returns dict with all steps successful
     """
-    mock_database_utils['verify_database_exists'].return_value = True
+    # Return False first (for verify_setup_complete), then True (for initialize_logging_infrastructure)
+    mock_database_utils['verify_database_exists'].side_effect = [False, True]
     
     results = orchestrator.run_setup(include_samples=False, force_recreate=False)
     
@@ -530,7 +638,8 @@ def test_run_setup_success_with_samples(orchestrator, mock_database_utils, mock_
     - Results include 'samples' key
     - Sample tables creation successful
     """
-    mock_database_utils['verify_database_exists'].return_value = True
+    # Return False first (for verify_setup_complete), then True (for initialize_logging_infrastructure)
+    mock_database_utils['verify_database_exists'].side_effect = [False, True]
     
     results = orchestrator.run_setup(include_samples=True)
     
@@ -588,7 +697,8 @@ def test_run_setup_partial_failure(orchestrator, mock_database_utils, mock_loggi
     - OrchestratorError raised when any step fails
     - Error message lists failed steps
     """
-    mock_database_utils['verify_database_exists'].return_value = True
+    # Return False so setup actually runs (database doesn't exist yet)
+    mock_database_utils['verify_database_exists'].return_value = False
     
     # Mock partial failure
     fake_orchestrator = FakeSetupOrchestrator()
@@ -824,7 +934,8 @@ def test_complete_setup_workflow(orchestrator, mock_database_utils, mock_logging
     3. Logging infrastructure initialization
     4. All components available after setup
     """
-    mock_database_utils['verify_database_exists'].return_value = True
+    # Return False first (for verify_setup_complete), then True (for initialize_logging_infrastructure)
+    mock_database_utils['verify_database_exists'].side_effect = [False, True]
     
     # Step 1: Verify prerequisites
     assert orchestrator.verify_prerequisites()
@@ -1280,7 +1391,8 @@ def test_main_setup_failure_exit_code(mock_config, mock_database_utils, mock_log
     
     Verifies failed setup results in error exit code.
     """
-    mock_database_utils['verify_database_exists'].return_value = True
+    # Return False so setup actually runs (database doesn't exist yet)
+    mock_database_utils['verify_database_exists'].return_value = False
     
     fake_orchestrator = FakeSetupOrchestrator()
     fake_orchestrator.run_complete_setup_result = {
