@@ -67,39 +67,62 @@ class FakeConfig:
 
 
 class FakeDatabaseCreator:
-    """Mock DatabaseCreator for testing."""
+    """Mock DatabaseCreator for testing.
+    
+    Test Scenarios Supported:
+    1. exists_result=True: Database already exists (skip creation)
+    2. exists_result=False + create_succeeds=True: Creation succeeds, verification succeeds
+    3. exists_result=False + create_succeeds=False: Creation succeeds but verification fails
+    4. exists_result=False + should_raise_on_create=True: Creation raises exception
+    """
     def __init__(self, *args, **kwargs):
         self.create_called = False
         self.drop_called = False
-        self.verify_called = False
-        self.exists_result = False  # Renamed for clarity
-        self.create_result = True
-        self.verify_result = True
+        
+        # Control flags for testing different scenarios
+        self.exists_result = False  # Database existence before operation
+        self.create_succeeds = True  # Whether creation should succeed
+        self.should_raise_on_create = False  # Whether to raise exception
+        self.exception_to_raise = Exception("Database creation failed")  # Exception to raise
         self.drop_result = True
         
-    def database_exists(self):
+    def check_database_exists(self) -> bool:
         """Check if database exists - matches real implementation."""
         return self.exists_result
     
-    def create_warehouse_database(self):
-        """Create database - matches real implementation."""
+    def create_database(self) -> None:
+        """Create database - matches real implementation (returns None, raises on error).
+        
+        Behavior based on test flags:
+        - If should_raise_on_create=True: Raise exception
+        - If create_succeeds=True: Set exists_result=True (successful creation)
+        - If create_succeeds=False: Leave exists_result unchanged (verification will fail)
+        """
         self.create_called = True
-        return self.create_result
+        
+        # Scenario: Creation should fail with exception
+        if self.should_raise_on_create:
+            raise self.exception_to_raise
+        
+        # Scenario: Creation succeeds (database will exist after)
+        if self.create_succeeds:
+            self.exists_result = True
+        
+        # Scenario: Creation completes but verification will fail
+        # (exists_result stays False - simulates race condition or permission issue)
     
-    def verify_database_creation(self):
-        """Verify database was created - matches real implementation."""
-        self.verify_called = True
-        return self.verify_result
-    
-    def drop_database_if_exists(self):
+    def drop_database(self, force: bool = True) -> bool:
         """Drop database - matches real implementation."""
         self.drop_called = True
         return self.drop_result
     
-    def drop_database(self):
-        """Drop database - matches real implementation."""
-        self.drop_called = True
-        return self.drop_result
+    def terminate_connections(self) -> int:
+        """Terminate database connections - matches real implementation."""
+        return 0
+    
+    def close_connections(self) -> None:
+        """Close connections - matches real implementation."""
+        pass
 
 
 class FakeSchemaCreator:
@@ -369,44 +392,86 @@ def test_end_setup_step_failure(orchestrator, mock_components):
 
 
 @pytest.mark.unit
-def test_create_database_success(orchestrator, mock_components):
-    """Test database creation when database doesn't exist."""
+def test_create_database_success_new_database(orchestrator, mock_components):
+    """
+    Scenario 1: Database doesn't exist, creation succeeds, verification succeeds.
+    
+    Expected: create_database() called, check_database_exists() returns True after creation.
+    Result: Method returns True.
+    """
     orchestrator._initialize_components()
-    orchestrator.db_creator.exists_result = False  # Changed
-    orchestrator.db_creator.create_result = True
+    
+    # Setup: Database doesn't exist initially, creation will succeed
+    orchestrator.db_creator.exists_result = False
+    orchestrator.db_creator.create_succeeds = True
     
     result = orchestrator.create_database()
     
     assert result is True
     assert orchestrator.db_creator.create_called is True
+    assert orchestrator.db_creator.exists_result is True  # Verify flag set after creation
 
 
 @pytest.mark.unit
 def test_create_database_already_exists(orchestrator, mock_components):
-    """Test database creation when database already exists."""
+    """
+    Scenario 2: Database already exists.
+    
+    Expected: check_database_exists() returns True immediately, skip creation.
+    Result: Method returns True, create_database() never called.
+    """
     orchestrator._initialize_components()
-    orchestrator.db_creator.exists_result = True  # Changed
+    
+    # Setup: Database already exists
+    orchestrator.db_creator.exists_result = True
     
     result = orchestrator.create_database()
     
     assert result is True
-    assert orchestrator.db_creator.create_called is False
+    assert orchestrator.db_creator.create_called is False  # Creation skipped
 
 
 @pytest.mark.unit
-def test_create_database_failure(orchestrator, mock_components):
+def test_create_database_verification_fails(orchestrator, mock_components):
     """
-    Test database creation when creation fails.
+    Scenario 3: Database doesn't exist, creation succeeds, but verification fails.
     
-    Verifies method returns False when creation fails.
+    Expected: create_database() called, but check_database_exists() still returns False.
+    Result: Method returns False (verification failed).
     """
     orchestrator._initialize_components()
-    orchestrator.db_creator.check_exists_result = False
-    orchestrator.db_creator.create_result = False
+    
+    # Setup: Database doesn't exist, creation completes but verification fails
+    orchestrator.db_creator.exists_result = False
+    orchestrator.db_creator.create_succeeds = False  # Verification will fail
     
     result = orchestrator.create_database()
     
     assert result is False
+    assert orchestrator.db_creator.create_called is True
+    assert orchestrator.db_creator.exists_result is False  # Still False after creation
+
+
+@pytest.mark.unit
+def test_create_database_exception_raised(orchestrator, mock_components):
+    """
+    Scenario 4: Database doesn't exist, creation raises exception.
+    
+    Expected: create_database() raises exception (e.g., DatabaseCreationError).
+    Result: Method raises SetupError with appropriate message.
+    """
+    orchestrator._initialize_components()
+    
+    # Setup: Database doesn't exist, creation will raise exception
+    orchestrator.db_creator.exists_result = False
+    orchestrator.db_creator.should_raise_on_create = True
+    orchestrator.db_creator.exception_to_raise = Exception("Permission denied")
+    
+    with pytest.raises(SetupError) as exc_info:
+        orchestrator.create_database()
+    
+    assert "Database creation failed" in str(exc_info.value)
+    assert orchestrator.db_creator.create_called is True
 
 
 @pytest.mark.unit
@@ -528,15 +593,39 @@ def test_run_complete_setup_success_with_samples(orchestrator, mock_components):
 
 
 @pytest.mark.integration
-def test_run_complete_setup_database_failure(orchestrator, mock_components):
+def test_run_complete_setup_database_failure_verification(orchestrator, mock_components):
     """
-    Test setup workflow when database creation fails.
+    Test setup workflow when database verification fails (returns False).
     
-    Verifies setup stops early on database failure.
+    Scenario: Database creation completes but verification fails.
+    Expected: results['database'] = False, setup stops early.
     """
     orchestrator._initialize_components()
-    orchestrator.db_creator.create_result = False
+    
+    # Database doesn't exist, creation will complete but verification fails
     orchestrator.db_creator.exists_result = False
+    orchestrator.db_creator.create_succeeds = False  # Verification will fail
+    
+    results = orchestrator.run_complete_setup()
+    
+    assert results['database'] is False
+    assert 'schemas' not in results  # Should stop after database failure
+
+
+@pytest.mark.integration
+def test_run_complete_setup_database_failure_exception(orchestrator, mock_components):
+    """
+    Test setup workflow when database creation raises exception.
+    
+    Scenario: Database creation raises exception (e.g., permission denied).
+    Expected: Exception caught, results['database'] = False, setup stops early.
+    """
+    orchestrator._initialize_components()
+    
+    # Database doesn't exist, creation will raise exception
+    orchestrator.db_creator.exists_result = False
+    orchestrator.db_creator.should_raise_on_create = True
+    orchestrator.db_creator.exception_to_raise = Exception("Permission denied")
     
     results = orchestrator.run_complete_setup()
     
@@ -649,7 +738,7 @@ def test_multiple_setup_runs(orchestrator, mock_components):
     assert all(results1.values())
     
     # Second setup (database already exists)
-    orchestrator.db_creator.check_exists_result = True
+    orchestrator.db_creator.exists_result = True
     results2 = orchestrator.run_complete_setup(include_samples=False)
     assert all(results2.values())
 
@@ -664,7 +753,7 @@ def test_partial_setup_recovery(orchestrator, mock_components):
     orchestrator._initialize_components()
     
     # Database exists but schemas don't
-    orchestrator.db_creator.check_exists_result = True
+    orchestrator.db_creator.exists_result = True
     
     result = orchestrator.create_database()
     assert result is True  # Should handle existing database
