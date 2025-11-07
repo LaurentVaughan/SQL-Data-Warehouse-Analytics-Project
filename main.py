@@ -199,6 +199,37 @@ class DataWarehouseOrchestrator:
             logger.error(f"❌ Prerequisite verification failed: {e}")
             raise OrchestratorError(f"Prerequisite verification failed: {e}")
     
+    def verify_setup_complete(self) -> bool:
+        """
+        Verify if warehouse setup is already complete.
+        
+        Checks:
+            1. Warehouse database exists
+            2. Database is accessible
+        
+        Note: This is a lightweight check. Does not verify all schemas/tables,
+        just confirms the database exists and is accessible.
+        
+        Returns:
+            True if warehouse database exists and is accessible
+            
+        Example:
+            >>> if orchestrator.verify_setup_complete():
+            ...     print("Warehouse ready for operations")
+        """
+        try:
+            # Check if warehouse database exists
+            if verify_database_exists(config.warehouse_db_name):
+                logger.debug(f"✅ Warehouse database '{config.warehouse_db_name}' exists")
+                return True
+            else:
+                logger.debug(f"❌ Warehouse database '{config.warehouse_db_name}' does not exist")
+                return False
+                
+        except Exception as e:
+            logger.debug(f"Setup verification failed: {e}")
+            return False
+    
     def initialize_logging_infrastructure(self) -> None:
         """
         Initialize audit logging infrastructure after warehouse setup.
@@ -298,6 +329,7 @@ class DataWarehouseOrchestrator:
             - DELEGATES to SetupOrchestrator which coordinates everything
             - Uses core.logger for console output
             - Initializes logs.* modules AFTER setup completes
+            - SKIPS setup if already complete (unless force_recreate=True)
         
         Args:
             include_samples: Create sample medallion tables for demo
@@ -309,6 +341,7 @@ class DataWarehouseOrchestrator:
                 - 'schemas': Schema creation success
                 - 'logging': Logging infrastructure success
                 - 'samples': Sample tables success (if include_samples=True)
+                - 'already_complete': True if setup was skipped (already done)
             
         Raises:
             OrchestratorError: If any setup step fails
@@ -329,17 +362,43 @@ class DataWarehouseOrchestrator:
             # 1. Verify prerequisites (connectivity, availability)
             self.verify_prerequisites()
             
-            # 2. Handle force recreate warning
+            # 2. Check if setup is already complete (unless force recreate)
+            if not force_recreate and self.verify_setup_complete():
+                logger.info("\n✅ Warehouse setup is already complete!")
+                logger.info("   Database exists and is accessible")
+                logger.info("\n💡 Options:")
+                logger.info("   • To recreate: python main.py --setup --force-recreate")
+                logger.info("   • To proceed: python main.py --bronze")
+                
+                # Initialize logging infrastructure for operations
+                self.initialize_logging_infrastructure()
+                
+                # Set setup_orchestrator to None (not needed, already complete)
+                self.setup_orchestrator = None
+                
+                logger.info("\n✅ Warehouse is ready for operations")
+                logger.info("\n🎯 Next Steps:")
+                logger.info("  1. Run bronze layer ingestion: python main.py --bronze")
+                logger.info("  2. Run full pipeline: python main.py --full-pipeline")
+                
+                return {
+                    'database': True,
+                    'schemas': True,
+                    'logging': True,
+                    'already_complete': True
+                }
+            
+            # 3. Handle force recreate warning
             if force_recreate:
                 logger.warning("\n⚠️  Force recreate enabled - existing database will be dropped")
                 logger.warning("⚠️  THIS IS A DESTRUCTIVE OPERATION")
                 # Actual recreation handled by SetupOrchestrator
             
-            # 3. Initialize setup orchestrator
+            # 4. Initialize setup orchestrator
             logger.info("\n🔧 Initializing setup orchestrator...")
             self.setup_orchestrator = SetupOrchestrator()
             
-            # 4. Delegate to SetupOrchestrator (which handles EVERYTHING)
+            # 5. Delegate to SetupOrchestrator (which handles EVERYTHING)
             logger.info("\n⚙️  Running complete warehouse setup...")
             logger.info("    (Database → Schemas → Logging Tables → Samples)")
             
@@ -347,18 +406,18 @@ class DataWarehouseOrchestrator:
                 include_samples=include_samples
             )
             
-            # 5. Check results
+            # 6. Check results
             if not all(results.values()):
                 failed_steps = [step for step, success in results.items() if not success]
                 raise OrchestratorError(
                     f"Setup failed for steps: {', '.join(failed_steps)}"
                 )
             
-            # 6. NOW initialize audit logging infrastructure (database ready!)
+            # 7. NOW initialize audit logging infrastructure (database ready!)
             logger.info("\n🔧 Setup completed, initializing audit logging...")
             self.initialize_logging_infrastructure()
             
-            # 7. Log setup completion
+            # 8. Log setup completion
             setup_duration = (datetime.now() - setup_start_time).total_seconds()
             
             logger.info("\n" + "=" * 70)
