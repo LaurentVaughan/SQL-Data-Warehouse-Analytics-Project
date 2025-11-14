@@ -69,6 +69,9 @@ from logs.audit_logger import AuditLoggerError, ProcessLogger
 from logs.error_handler import ErrorHandlerError, ErrorLogger, ErrorRecovery
 from logs.performance_monitor import PerformanceMonitor, PerformanceMonitorError
 
+# Medallion architecture imports
+from medallion.bronze import BronzeManager
+
 # Setup orchestration
 from setup.setup_orchestrator import SetupError, SetupOrchestrator
 
@@ -81,7 +84,6 @@ from utils.database_utils import (
 )
 
 # Future imports (placeholders)
-# from medallion.bronze import BronzeLayerOrchestrator
 # from medallion.silver import SilverLayerOrchestrator
 # from medallion.gold import GoldLayerOrchestrator
 
@@ -450,108 +452,89 @@ class DataWarehouseOrchestrator:
     def run_bronze_ingestion(
         self,
         source: str = 'all',
-        batch_size: int = 1000
+        batch_size: int = 10000
     ) -> Dict[str, Any]:
         """
-        Run bronze layer data ingestion (PLACEHOLDER FOR FUTURE).
+        Run bronze layer data ingestion.
         
-        Architecture (Future):
-            1. Initialize audit logging if needed
-            2. Start process tracking (ProcessLogger)
-            3. Optional performance monitoring (PerformanceMonitor)
-            4. Delegate to BronzeLayerOrchestrator
-            5. Log errors to database (ErrorLogger)
-            6. End process tracking
+        Loads raw data from CSV files into bronze schema tables with
+        comprehensive audit logging and lineage tracking.
         
         Args:
-            source: Source system ('crm', 'erp', 'all')
-            batch_size: Batch size for processing
+            source: Data source to load ('crm', 'erp', or 'all')
+            batch_size: Number of rows per batch insert
             
         Returns:
-            Ingestion results dictionary
+            Dictionary with ingestion results:
+                - status: 'SUCCESS' or 'FAILED'
+                - source: Source system processed
+                - tables_loaded: Number of tables successfully loaded
+                - total_tables: Total number of tables attempted
+                - results: Detailed results for each table
             
         Raises:
             OrchestratorError: If ingestion fails
-            
-        Note:
-            This is a PLACEHOLDER. Actual implementation will:
-            - Use logs.audit_logger for process tracking
-            - Use logs.error_handler for error management
-            - Use logs.performance_monitor if enabled
-            - Delegate to medallion.bronze module
             
         Example:
             >>> orchestrator.run_bronze_ingestion(source='crm')
         """
         logger.info("\n" + "=" * 70)
-        logger.info(f"🥉 BRONZE LAYER INGESTION - Source: {source}")
+        logger.info(f"🔵 BRONZE LAYER INGESTION - Source: {source}")
         logger.info("=" * 70)
         
-        # Ensure audit logging infrastructure is available
-        if not self.process_logger:
-            logger.info("Audit logging not initialized, initializing now...")
-            self.initialize_logging_infrastructure()
-        
         try:
-            # Start process tracking (DATABASE AUDIT)
-            self.current_process_id = self.process_logger.start_process(
-                process_name=f'bronze_ingestion_{source}',
-                process_description=f'Ingest raw data from {source} system',
-                source_system=source,
-                target_layer='bronze',
-                metadata={'batch_size': batch_size}
-            )
-            logger.info(f"✅ Started process tracking (log_id={self.current_process_id})")
+            # Ensure audit logging infrastructure is available
+            if self.process_logger is None:
+                logger.info("Initializing audit logging infrastructure...")
+                self.initialize_logging_infrastructure()
             
-            # Performance monitoring context (OPTIONAL)
-            if self.perf_monitor:
-                with self.perf_monitor.monitor_process(self.current_process_id) as pm:
-                    # TODO: Implement bronze layer ingestion
-                    # from medallion.bronze import BronzeLayerOrchestrator
-                    # bronze_orchestrator = BronzeLayerOrchestrator(...)
-                    # results = bronze_orchestrator.ingest(source, batch_size)
-                    
-                    logger.warning("⚠️  Bronze layer ingestion not yet implemented")
-                    results = {'status': 'NOT_IMPLEMENTED'}
-                    
-                    # Record metrics
-                    pm.record_metric('rows_processed', 0, 'rows')
-                    pm.record_metric('files_processed', 0, 'files')
+            # Initialize BronzeManager
+            logger.info("🔧 Initializing BronzeManager...")
+            bronze_manager = BronzeManager(monitor_performance=self.monitor_performance)
+            
+            # Load data based on source
+            if source.lower() == 'crm':
+                logger.info("📊 Loading CRM data...")
+                results = bronze_manager.load_all_crm_data()
+            elif source.lower() == 'erp':
+                logger.info("📊 Loading ERP data...")
+                results = bronze_manager.load_all_erp_data()
+            elif source.lower() == 'all':
+                logger.info("📊 Loading all data (CRM + ERP)...")
+                results = bronze_manager.load_all_data()
             else:
-                logger.warning("⚠️  Bronze layer ingestion not yet implemented")
-                results = {'status': 'NOT_IMPLEMENTED'}
+                raise OrchestratorError(
+                    f"Unknown source: {source}. Use 'crm', 'erp', or 'all'"
+                )
             
-            # End process tracking
-            self.process_logger.end_process(
-                log_id=self.current_process_id,
-                status='SUCCESS',
-                rows_processed=0
-            )
-            logger.info("✅ Process completed and logged to database")
+            # Cleanup
+            bronze_manager.close()
             
-            return results
+            # Count successes
+            success_count = sum(1 for r in results.values() if 'error' not in r)
+            total_count = len(results)
+            
+            logger.info(f"\n✅ Bronze ingestion completed: {success_count}/{total_count} tables loaded")
+            
+            return {
+                'status': 'SUCCESS' if success_count == total_count else 'PARTIAL',
+                'source': source,
+                'tables_loaded': success_count,
+                'total_tables': total_count,
+                'results': results
+            }
             
         except Exception as e:
-            logger.error(f"❌ Bronze ingestion failed: {e}", exc_info=True)
+            error_msg = f"Bronze ingestion failed: {e}"
+            logger.error(error_msg, exc_info=True)
             
-            # Log error to DATABASE (not just console)
-            if self.error_logger and self.current_process_id:
+            if self.error_logger:
                 self.error_logger.log_exception(
-                    process_log_id=self.current_process_id,
-                    exception=e,
-                    context={'source': source, 'batch_size': batch_size},
-                    recovery_suggestion="Check source data availability and format"
+                    error=e,
+                    recovery_suggestion="Check CSV files and database connectivity"
                 )
             
-            # End process as FAILED in database
-            if self.process_logger and self.current_process_id:
-                self.process_logger.end_process(
-                    log_id=self.current_process_id,
-                    status='FAILED',
-                    error_message=str(e)
-                )
-            
-            raise OrchestratorError(f"Bronze ingestion failed: {e}")
+            raise OrchestratorError(error_msg)
     
     # ========================================================================
     # FUTURE: Silver Layer Operations
@@ -704,8 +687,11 @@ Examples:
   # Force recreate database (DANGEROUS!)
   python main.py --setup --force-recreate
   
-  # Run bronze layer ingestion (future)
+  # Run bronze layer ingestion for CRM data
   python main.py --bronze --source crm
+  
+  # Run bronze layer for all data with custom batch size
+  python main.py --bronze --source all --batch-size 5000
   
   # Run full pipeline with monitoring (future)
   python main.py --full-pipeline --monitor
@@ -739,14 +725,20 @@ Architecture:
     parser.add_argument(
         '--bronze',
         action='store_true',
-        help='Run bronze layer ingestion (NOT YET IMPLEMENTED)'
+        help='Run bronze layer ingestion'
     )
     parser.add_argument(
         '--source',
         type=str,
         choices=['crm', 'erp', 'all'],
         default='all',
-        help='Source system for bronze ingestion'
+        help='Source system for bronze ingestion (default: all)'
+    )
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=10000,
+        help='Batch size for bronze ingestion (default: 10000)'
     )
     
     # Silver layer operations (future)
@@ -813,10 +805,21 @@ Architecture:
                 return 1
         
         elif args.bronze:
-            # Run bronze ingestion (future)
+            # Run bronze ingestion
             orchestrator.initialize_logging_infrastructure()
-            results = orchestrator.run_bronze_ingestion(source=args.source)
-            return 0
+            results = orchestrator.run_bronze_ingestion(
+                source=args.source,
+                batch_size=args.batch_size
+            )
+            
+            if results['status'] == 'SUCCESS':
+                logger.info(f"\n🎉 Bronze ingestion completed successfully!")
+                logger.info(f"   {results['tables_loaded']}/{results['total_tables']} tables loaded")
+                return 0
+            else:
+                logger.warning(f"\n⚠️  Bronze ingestion completed with errors")
+                logger.warning(f"   {results['tables_loaded']}/{results['total_tables']} tables loaded")
+                return 1
         
         elif args.silver:
             # Run silver transformation (future)
