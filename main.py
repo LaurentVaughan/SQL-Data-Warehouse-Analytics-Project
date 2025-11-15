@@ -531,7 +531,7 @@ class DataWarehouseOrchestrator:
             if self.error_logger:
                 # Get the latest process log ID if available
                 process_log_id = (
-                    orchestrator.process_logger.started_processes[-1]['id']
+                    self.process_logger.started_processes[-1]['id']
                     if self.process_logger and self.process_logger.started_processes
                     else None
                 )
