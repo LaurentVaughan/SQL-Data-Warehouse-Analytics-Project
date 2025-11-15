@@ -65,7 +65,6 @@ from logs.performance_monitor import PerformanceMonitor
 # SQL utilities
 from sql.ddl import create_table
 from sql.dml import bulk_insert
-from sql.query_builder import check_table_exists_sql
 
 # Database utilities
 from utils.database_utils import create_sqlalchemy_engine, verify_database_exists
@@ -316,9 +315,16 @@ class BronzeManager:
         
         try:
             with self.engine.connect() as conn:
-                sql = check_table_exists_sql(schema, table_name)
+                sql = f"""
+                SELECT EXISTS (
+                    SELECT 1 
+                    FROM information_schema.tables 
+                    WHERE table_schema = '{schema}' 
+                    AND table_name = '{table_name}'
+                )
+                """
                 result = conn.execute(text(sql))
-                exists = result.fetchone()[0]
+                exists = result.scalar()
                 return exists
         except Exception as e:
             logger.error(f"Error checking table existence: {e}")
@@ -570,8 +576,8 @@ class BronzeManager:
             logger.error(error_msg, exc_info=True)
             
             self.error_logger.log_exception(
-                error=e,
                 process_log_id=process_log_id,
+                exception=e,
                 recovery_suggestion="Check CSV file format and database connection"
             )
             
