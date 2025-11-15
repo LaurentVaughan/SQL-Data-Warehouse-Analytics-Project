@@ -529,10 +529,18 @@ class DataWarehouseOrchestrator:
             logger.error(error_msg, exc_info=True)
             
             if self.error_logger:
-                self.error_logger.log_exception(
-                    error=e,
-                    recovery_suggestion="Check CSV files and database connectivity"
+                # Get the latest process log ID if available
+                process_log_id = (
+                    orchestrator.process_logger.started_processes[-1]['id']
+                    if self.process_logger and self.process_logger.started_processes
+                    else None
                 )
+                if process_log_id:
+                    self.error_logger.log_exception(
+                        process_log_id=process_log_id,
+                        exception=e,
+                        recovery_suggestion="Check CSV files and database connectivity"
+                    )
             
             raise OrchestratorError(error_msg)
     
